@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<!--
+  Chromatory Assembly — standalone edition.
+  Assemble multi-part miniature kits in the browser: load several STLs, move and rotate them,
+  snap mating surfaces together, and save one merged STL. Nothing is uploaded anywhere.
+
+  Thin shell around the SAME module the Chromatory app uses (js/assembly.js); the deploy
+  script copies that module and the vendored three.js libs from the main source tree.
+  Lives at /assembly/ on the same Pages site as the Light Studio (../).
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chromatory — Assembly</title>
+    <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
+    <script type="importmap">{ "imports": { "three": "../lib/three/three.module.js" } }</script>
+    <style>
+        * { box-sizing: border-box; }
+        body { background: #14171a; color: #ddd; font-family: system-ui, sans-serif; margin: 0; }
+        header { max-width: 1060px; margin: 0 auto; padding: 14px 18px 4px; }
+        h1 { font-size: 20px; margin: 0; }
+        .muted { color: #98a4ae; } .small { font-size: 12px; }
+        main { max-width: 1060px; margin: 0 auto; padding: 0 18px 40px; }
+        #canvas { width: min(100%, calc(76vh * 4 / 3)); aspect-ratio: 4/3; margin: 0 auto;
+                  border-radius: 10px; background: #101315; touch-action: none; display: block; }
+        @media (min-width: 1500px) {
+            header, main { max-width: 1780px; }
+            main { display: grid; grid-template-columns: minmax(0, 1fr) 480px; gap: 26px; align-items: start; }
+            #stage { position: sticky; top: 12px; }
+            main > footer { grid-column: 1 / -1; }
+        }
+        #drop { border: 2px dashed #2d6cdf; border-radius: 10px; padding: 28px 16px; text-align: center; margin: 12px 0; cursor: pointer; }
+        #drop.hover { background: #1a2436; }
+        h2 { font-size: 15px; margin: 16px 0 6px; }
+        .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+        button {
+            background: #232a31; color: #ddd; border: 1px solid #2a3138; border-radius: 8px;
+            padding: 7px 12px; font-size: 14px; cursor: pointer;
+        }
+        button.primary { background: #2d6cdf; border-color: #2d6cdf; color: #fff; }
+        button.active { background: #2d6cdf; border-color: #2d6cdf; color: #fff; }
+        button.ghost { background: none; }
+        input[type="range"] { accent-color: #2d6cdf; }
+        label { font-size: 13px; color: #98a4ae; display: inline-flex; gap: 6px; align-items: center; }
+        .card { background: #1c2126; border: 1px solid #2a3138; border-radius: 10px; padding: 8px 12px; margin: 6px 0; }
+        .card.selected { border-color: #2d6cdf; }
+        a.unread { color: #ffd27a; }
+        a.unread::after { content: ' ●'; color: #e0a93d; }
+        .spread { justify-content: space-between; }
+        .dot { width: 14px; height: 14px; border-radius: 4px; display: inline-block; flex: none; }
+        a { color: #7fb4ff; }
+        footer { margin-top: 28px; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>Chromatory — Assembly</h1>
+    <p class="muted small">Assemble multi-part kits: load the STLs, drag parts roughly into place,
+        and snap fits them precisely. Parts load exactly where the sculptor exported them, so many
+        kits assemble the moment they load. Runs entirely in your browser — files never leave your
+        device. Also try the <a href="../">Light Studio</a>.
+        · <a href="../news.html" id="newsLink">🔔 News</a> · <a href="../terms.html">Terms</a></p>
+</header>
+<main>
+    <div id="stage">
+    <div id="drop">
+        <b>Drop part STLs here</b> or <a href="#" id="pick">choose files</a>
+        <div class="muted small" id="loadstatus">binary or ASCII STL · several at once is fine · stays on your device</div>
+        <input type="file" id="files" accept=".stl" multiple style="display:none" />
+    </div>
+
+    <canvas id="canvas"></canvas>
+    <div class="row">
+        <button id="snapBtn" class="primary" title="Fit the selected part against the nearest neighbouring surface">🧲 Snap it</button>
+        <label><input type="checkbox" id="autoSnap" /> auto-snap on release</label>
+        <button class="ghost" id="frame" title="Frame all parts">⛶</button>
+        <span class="muted small" style="margin-left:auto">click a part: arrows move, rings rotate
+            (about the part's centre) · <b>Del</b> removes · <b>Ctrl+Z</b> undoes</span>
+    </div>
+    <div class="row"><span class="muted small" id="snapstatus"></span></div>
+    </div><!-- /stage -->
+
+    <div id="panel">
+    <h2>Parts</h2>
+    <div id="parts"></div>
+
+    <h2>Save</h2>
+    <div class="row">
+        <label title="Kits often leave a small clearance between parts so they slot together. Turn this on to close that gap on export — the mating surfaces are nudged to overlap so the print comes out as one solid piece instead of two with a seam.">
+            <input type="checkbox" id="stitch" /> Close joint gaps
+        </label>
+        <label class="muted small" id="stitchTolRow" style="display:none" title="Largest gap to close, in model units (usually mm). Set it a touch above the kit's designed clearance — bigger gaps than this are left alone.">
+            up to <input type="number" id="stitchTol" min="0.05" max="2" step="0.05" value="0.2" style="width:64px"> mm
+        </label>
+        <!-- Method selector is an early-access (advance channel) option; the publish script flips
+             FEATURES.gapBridge on for the patron build and it stays hidden on the public build. -->
+        <select id="stitchMode" style="display:none" title="Nudge: move the mating surfaces to overlap (simplest). Bridge: leave both parts exactly as sculpted and add filler geometry across the gap.">
+            <option value="nudge">nudge parts together</option>
+            <option value="bridge">add bridge geometry</option>
+        </select>
+    </div>
+    <div class="row">
+        <button class="primary" id="exportBtn">💾 Save merged STL…</button>
+        <span class="muted small">hidden parts are left out — use 👁 to exclude alternates</span>
+    </div>
+    </div><!-- /panel -->
+
+    <footer class="muted small">
+        Part of <b>Chromatory</b>, the local-first assistant for miniature painters.
+        Free to use; your files stay on your device. · <a href="../">Light Studio</a>
+    </footer>
+</main>
+
+<script type="module">
+    import * as studio from '../js/assembly.js';
+
+    // Release-channel feature flags — rewritten by the publish script per channel (stable/advance).
+    // gapBridge = the add-geometry gap-close mode, an early-access feature for patrons first.
+    const FEATURES = { gapBridge: true };
+
+    const $ = id => document.getElementById(id);
+    studio.init($('canvas'));
+    studio.bindFileInput('files');
+    studio.setStatusCallback(text => { $('snapstatus').textContent = text; });
+
+    // ---- Loading (picker + drag & drop)
+    $('pick').addEventListener('click', event => { event.preventDefault(); $('files').click(); });
+    const drop = $('drop');
+    drop.addEventListener('click', event => { if (event.target.id !== 'pick') $('files').click(); });
+    drop.addEventListener('dragover', event => { event.preventDefault(); drop.classList.add('hover'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('hover'));
+    drop.addEventListener('drop', async event => {
+        event.preventDefault();
+        drop.classList.remove('hover');
+        for (const file of event.dataTransfer.files) {
+            $('loadstatus').textContent = `reading ${file.name}…`;
+            studio.addPartFromBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+        }
+        $('loadstatus').textContent = 'loaded — parts appear exactly where the sculptor exported them';
+        renderParts();
+    });
+
+    // ---- Toolbar
+    $('autoSnap').addEventListener('change', () => studio.setAutoSnap($('autoSnap').checked));
+    $('frame').addEventListener('click', () => studio.frameAll());
+    $('snapBtn').addEventListener('click', async () => {
+        const result = await studio.snapSelected(false);
+        $('snapstatus').textContent = result.snapped
+            ? `snapped — contact gap ${result.gap.toFixed(2)} across ${result.contacts} points`
+            : `no snap: ${result.reason}`;
+        renderParts();
+    });
+
+    // ---- Parts list
+    function renderParts() {
+        const list = JSON.parse(studio.listPartsJson());
+        const host = $('parts');
+        host.innerHTML = list.length ? '' : '<p class="muted small">No parts loaded yet.</p>';
+        for (const part of list) {
+            const card = document.createElement('div');
+            card.className = part.selected ? 'card selected' : 'card';
+            card.innerHTML = `
+                <div class="row spread">
+                    <span class="row" style="gap:8px">
+                        <span class="dot" style="background:${part.color}"></span>
+                        <b>${part.name}</b>
+                        <span class="muted small">${part.triangles.toLocaleString()} tris</span>
+                    </span>
+                    <span class="row">
+                        <label>scale <input type="range" data-id="${part.id}" data-k="scale"
+                            min="0.1" max="4" step="0.05" value="${part.scale}"
+                            title="uniform scale — for kitbashing parts from different sets"></label>
+                        <button class="ghost" data-id="${part.id}" data-k="eye"
+                            title="show/hide (hidden parts are excluded from the export)">${part.visible ? '👁' : '🚫'}</button>
+                        <button class="ghost" data-id="${part.id}" data-k="remove" title="remove part">✕</button>
+                    </span>
+                </div>`;
+            card.addEventListener('click', event => {
+                if (event.target.dataset.k) return;
+                studio.selectPart(part.id);
+                renderParts();
+            });
+            host.appendChild(card);
+        }
+        host.querySelectorAll('[data-k]').forEach(el => {
+            const id = parseInt(el.dataset.id, 10);
+            if (el.dataset.k === 'remove') el.addEventListener('click', () => { studio.removePart(id); renderParts(); });
+            else if (el.dataset.k === 'eye') el.addEventListener('click', () => {
+                const part = JSON.parse(studio.listPartsJson()).find(p => p.id === id);
+                studio.setPartVisible(id, !part.visible);
+                renderParts();
+            });
+            else if (el.dataset.k === 'scale') el.addEventListener('input', () => studio.setPartScale(id, parseFloat(el.value)));
+        });
+    }
+    studio.setChangeCallback(renderParts);
+    renderParts();
+
+    // News badge: highlighted until the news page for this version has been opened once.
+    if (localStorage.getItem('pb-news-seen') !== '2026-07-10') $('newsLink').classList.add('unread');
+
+    // ---- Save merged STL (Save As dialog where supported, download otherwise)
+    async function saveBlob(blob, suggestedName, description, mime, ext) {
+        if (window.showSaveFilePicker) {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName, types: [{ description, accept: { [mime]: [ext] } }] });
+                const writable = await handle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                return;
+            } catch (error) {
+                if (error.name === 'AbortError') return;
+            }
+        }
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = suggestedName;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+    function syncStitchRow() {
+        const on = $('stitch').checked;
+        $('stitchTolRow').style.display = on ? '' : 'none';
+        $('stitchMode').style.display = (on && FEATURES.gapBridge) ? '' : 'none';
+    }
+    $('stitch').addEventListener('change', syncStitchRow);
+    $('exportBtn').addEventListener('click', () => {
+        const tol = $('stitch').checked ? parseFloat($('stitchTol').value) || 0 : 0;
+        const mode = (FEATURES.gapBridge && $('stitch').checked) ? $('stitchMode').value : 'nudge';
+        const bytes = studio.exportStlBytes(tol, mode);
+        saveBlob(new Blob([bytes], { type: 'model/stl' }), 'assembled.stl', 'STL model', 'model/stl', '.stl');
+    });
+</script>
+</body>
+</html>

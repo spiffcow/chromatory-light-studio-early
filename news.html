@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chromatory — News</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <style>
+        * { box-sizing: border-box; }
+        body { background: #14171a; color: #ddd; font-family: system-ui, sans-serif; margin: 0; }
+        header { max-width: 760px; margin: 0 auto; padding: 14px 18px 4px; }
+        h1 { font-size: 20px; margin: 0; }
+        main { max-width: 760px; margin: 0 auto; padding: 0 18px 40px; }
+        .muted { color: #98a4ae; } .small { font-size: 13px; }
+        .card { background: #1c2126; border: 1px solid #2a3138; border-radius: 10px; padding: 12px 16px; margin: 12px 0; }
+        .card.note { border-color: #6b5a2a; background: #211f16; }
+        h2 { font-size: 15px; margin: 4px 0 8px; }
+        li { margin: 6px 0; }
+        a { color: #7fb4ff; }
+        kbd { background: #2a3138; border-radius: 4px; padding: 0 5px; font-size: 12px; }
+        footer { margin-top: 28px; }
+    </style>
+</head>
+<body>
+<header>
+    <h1>Chromatory — News</h1>
+    <p class="muted small"><a href="./">← Light Studio</a> · <a href="terms.html">Terms &amp; Conditions</a></p>
+</header>
+<main>
+    <div class="card">
+        <h2>Release notes — July 14, 2026</h2>
+        <ul class="small">
+            <li><b>🖌 Paint regions.</b> Mark out areas on the model — armour, cloth, skin — and give
+                each its own colour and finish (matte, satin, gloss or metal). Paint with a brush or
+                click-to-fill, down to a fine detail size for clean edges. Highlight one area at a
+                time to focus on it, and save or load your painting as a file.</li>
+            <li><b>Shadows that actually block light.</b> Line-of-sight is now properly occluded — a
+                lantern behind the model no longer lights the front, and large / soft light sources
+                cast solid shadows too (they used to leak straight through).</li>
+            <li><b>Redesigned controls.</b> The panel is now organised into collapsible sections —
+                Look, Lights, Regions, Rigs, Capture and Scene — matching the full Chromatory app, so
+                the two feel the same.</li>
+            <li><b>🧩 Assembly: close joint gaps.</b> Kits often leave a little clearance between
+                parts so they slot together. A new export option nudges those mating surfaces to
+                overlap, so the combined STL prints as one solid piece instead of two with a seam —
+                your outer detail and dimensions stay exactly as sculpted.</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>Release notes — July 13, 2026</h2>
+        <ul class="small">
+            <li><b>🧩 Assembly workbench.</b> New free tool: load a multi-part kit's STLs, snap the
+                parts together, and export one combined STL — ready for the Light Studio or your
+                slicer. Find it linked at the top of the page.</li>
+            <li><b>Scene: multiple STLs.</b> Add extra models (a base, scenery, a second mini) as
+                movable props and light the composed scene together.</li>
+            <li><b>Light sources look like light sources.</b> The handle spheres now glow at each
+                light's colour and brightness. A new "Light source dots" toggle hides them while the
+                lights keep shining — saved renders follow the toggle.</li>
+            <li><b>Rigs save everything.</b> A saved rig now restores the look, colour and sliders —
+                not just the lights — and the panel follows along on load.</li>
+        </ul>
+    </div>
+
+    <div class="card">
+        <h2>Release notes — July 10, 2026</h2>
+        <ul class="small">
+            <li><b>Lock highlights.</b> Freeze specular reflections as seen from your chosen painting
+                view, then orbit freely — the hotspots stay where you'll paint them.</li>
+            <li><b>Shadow colour &amp; strength.</b> Shade toward a colour (try a cool blue-violet)
+                instead of black, and back the occlusion off to taste.</li>
+            <li><b>Light management.</b> Click a light in the panel to select it in the view; switch
+                lights off without removing them; clone a light with all its settings;
+                <kbd>Delete</kbd> removes and <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes.</li>
+            <li><b>Stability.</b> Fixed a crash with multiple large light sources, and light handles
+                can no longer vanish under the table.</li>
+        </ul>
+    </div>
+
+    <footer class="muted small">
+        Part of <b>Chromatory</b>, the local-first assistant for miniature painters.
+        Use is subject to the <a href="terms.html">Terms &amp; Conditions</a>.
+    </footer>
+</main>
+<script>
+    // Seeing this page clears the "unread" badge on the studio pages.
+    localStorage.setItem('pb-news-seen', '2026-07-14');
+</script>
+</body>
+</html>

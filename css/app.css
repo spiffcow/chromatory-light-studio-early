@@ -1,0 +1,180 @@
+/* Paint Buddy web client — mobile-first, dark, thumb-friendly. */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+/* The studio pages break out to full window width; clip the scrollbar-width
+   overflow that 100vw introduces (clip, not hidden, so sticky still works). */
+html { overflow-x: clip; }
+body {
+    background: #14171a;
+    color: #e8e8e8;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    font-size: 16px;
+}
+.boot { padding: 40px; color: #888; text-align: center; }
+
+.shell { min-height: 100vh; display: flex; flex-direction: column; }
+.topbar {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 14px;
+    background: #1c2126;
+    position: sticky; top: 0; z-index: 10;
+}
+.brand { font-weight: 700; font-size: 18px; color: #e8e8e8; text-decoration: none; }
+.topbar nav { display: flex; gap: 14px; }
+.topbar nav a { color: #9db4c8; text-decoration: none; font-size: 15px; }
+.content { padding: 14px; max-width: 760px; width: 100%; margin: 0 auto; }
+
+h1 { font-size: 22px; margin: 6px 0 12px; }
+h2 { font-size: 17px; margin: 14px 0 8px; }
+.muted { color: #8a9099; }
+.small { font-size: 13px; }
+.error { color: #e07777; }
+
+.card {
+    background: #1c2126; border: 1px solid #2a3138; border-radius: 10px;
+    padding: 12px 14px; margin-bottom: 10px;
+    display: block; color: inherit; text-decoration: none;
+}
+a.card:active { background: #232a31; }
+.card .title { font-weight: 600; }
+/* The step you're actively painting: a warm left edge so "now" reads at a glance. */
+.card.active-step { border-left: 3px solid #d3bd7f; background: #211f16; }
+
+/* Project page tabs */
+.tabs { display: flex; gap: 4px; margin: 12px 0; border-bottom: 1px solid #2a3138; }
+.tabs button {
+    background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+    color: #9ab; padding: 8px 14px; font-size: 15px; cursor: pointer;
+}
+.tabs button.active { color: #fff; border-bottom-color: #2d6cdf; }
+
+/* Photo gallery grid */
+.gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 10px 0; }
+.gallery figure { margin: 0; }
+.gallery img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+.gallery figcaption { padding-top: 2px; }
+
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.spread { justify-content: space-between; }
+
+.badge {
+    font-size: 12px; padding: 2px 8px; border-radius: 10px;
+    background: #2a3138; color: #9db4c8; white-space: nowrap;
+}
+.badge.done { background: #1e3a2a; color: #7fd39a; }
+.badge.inprogress { background: #3a331e; color: #d3bd7f; }
+.badge.problem { background: #3a1e1e; color: #d37f7f; }
+
+input[type="text"], input[type="number"], textarea, select {
+    width: 100%; padding: 10px 12px; margin: 4px 0;
+    background: #14171a; color: #e8e8e8;
+    border: 1px solid #2a3138; border-radius: 8px; font-size: 16px;
+}
+textarea { min-height: 70px; resize: vertical; }
+label { font-size: 13px; color: #8a9099; }
+
+button, .btn {
+    padding: 10px 16px; margin: 4px 4px 4px 0;
+    background: #2a3138; color: #e8e8e8;
+    border: none; border-radius: 8px; font-size: 15px; cursor: pointer;
+}
+button.primary { background: #2d6cdf; color: white; }
+button.success { background: #24704b; color: white; }
+button.warn { background: #8a6d1f; color: white; }
+button.danger { background: #7a2c2c; color: white; }
+button.ghost { background: transparent; color: #9db4c8; }
+button:disabled { opacity: 0.5; }
+
+/* Inventory list */
+.filters { display: flex; gap: 8px; align-items: center; }
+.filters select { flex: 1; width: auto; }
+.filters button { flex: none; margin: 4px 0; }
+.swatch {
+    width: 20px; height: 20px; border-radius: 5px;
+    border: 1px solid #3a424a; flex: none; display: inline-block;
+}
+.paint-card { cursor: pointer; }
+.card.selected-part { border-color: #2d6cdf; }
+.suggestions { display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin: 4px 0; }
+.suggestions button { text-align: left; margin: 0; padding: 6px 10px; display: flex; gap: 8px; align-items: center; }
+.suggestions button:hover { background: #232a31; }
+.paint-meta { margin-top: 2px; }
+.paint-detail { margin-top: 8px; border-top: 1px solid #2a3138; padding-top: 8px; }
+.paint-notes { white-space: pre-wrap; margin-top: 4px; }
+
+.steps .card { margin-bottom: 8px; }
+.filebtn { display: inline-block; }
+.filebtn input[type="file"] { display: none; }
+.pair-box { max-width: 380px; margin: 8vh auto 0; }
+
+.zoomable { cursor: zoom-in; }
+.lightbox {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(0, 0, 0, 0.92);
+    display: flex; align-items: center; justify-content: center;
+    cursor: zoom-out;
+}
+.lightbox img { max-width: 96vw; max-height: 96vh; object-fit: contain; }
+.code-input { font-size: 26px; letter-spacing: 8px; text-align: center; font-family: Consolas, monospace; }
+
+/* AI is working — a spinner + a message in the accent colour so it's obvious the AI is thinking. */
+.ai-thinking {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: #6ea8fe; font-size: 14px; margin: 6px 0;
+}
+.ai-thinking .spinner {
+    width: 14px; height: 14px; border-radius: 50%; flex: none;
+    border: 2px solid rgba(45, 108, 223, 0.3); border-top-color: #6ea8fe;
+    animation: pb-spin 0.7s linear infinite;
+}
+@keyframes pb-spin { to { transform: rotate(360deg); } }
+
+/* Collapsible panel sections (Light Studio et al): a card whose header toggles it. */
+details.section { padding: 10px 12px; margin: 10px 0; }
+details.section > summary {
+    cursor: pointer; font-weight: 600; font-size: 1.02rem;
+    list-style: none; user-select: none;
+}
+details.section > summary::-webkit-details-marker { display: none; }
+details.section > summary::before { content: "▸ "; color: #8a93a3; }
+details.section[open] > summary::before { content: "▾ "; }
+details.section[open] > summary { margin-bottom: 6px; }
+
+/* A thumbs-down conversation card: dimmed with a red edge — it's excluded from what's sent to the AI. */
+.card.excluded {
+    opacity: 0.6;
+    border-color: #d3574e;
+    border-left-width: 3px;
+    background: rgba(211, 87, 78, 0.06);
+}
+
+/* Light Studio / Assembly layout. On narrow screens everything stacks in one
+   column (the default block flow below). On wide screens the controls move to
+   a panel BESIDE the render — mirroring the standalone studio — which needs
+   more room than the 760px .content cap, so the layout breaks out to the full
+   window width first. */
+.studio-canvas { display: block; }
+
+@media (min-width: 1200px) {
+    /* Break out of the centered 760px .content column to use the whole window. */
+    .studio-layout {
+        width: 100vw;
+        margin-left: calc(50% - 50vw);
+        margin-right: calc(50% - 50vw);
+        padding-inline: 16px;
+    }
+    .studio-inner { max-width: 1780px; margin: 0 auto; }
+    /* Render on the left (flexible, sticky as you scroll the controls), panel right. */
+    .studio-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 460px;
+        gap: 24px;
+        align-items: start;
+    }
+    .studio-stage { position: sticky; top: 60px; }
+    .studio-panel { min-width: 0; }
+    /* Cap the render by viewport height so a wide stage column can't make it huge. */
+    .studio-stage .studio-canvas { max-width: calc(80vh * 4 / 3); margin-inline: auto; }
+    /* First control card sits flush with the top of the render. */
+    .studio-panel > .section:first-of-type { margin-top: 0; }
+}

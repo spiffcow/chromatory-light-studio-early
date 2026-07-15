@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<!--
+  Chromatory Light Studio — standalone edition.
+  A free, fully client-side light-placement reference for miniature painters (NMM/OSL):
+  load the STL you print from, place lights, pick a metal or paint look, and read the
+  highlights off the render. Nothing is uploaded anywhere — the STL never leaves your browser,
+  so there is no file size limit beyond your machine's memory.
+
+  This page is a thin shell around the SAME renderer module the Chromatory app uses
+  (js/lightstudio.js); the deploy script copies that module and the vendored three.js libs
+  from the main source tree, so the two never drift.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chromatory — Light Studio</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <script type="importmap">{ "imports": { "three": "./lib/three/three.module.js" } }</script>
+    <!-- The SAME stylesheet the Chromatory app uses (copied from the source tree by the deploy
+         script alongside lightstudio.js) — the tabbed section layout, cards, buttons and the
+         two-column studio grid all come from here, so the two never drift. -->
+    <link rel="stylesheet" href="css/app.css" />
+    <style>
+        /* Standalone-only bits that aren't in the shared app stylesheet. */
+        header { padding: 12px 0 2px; }
+        header h1 { margin: 0; }
+        a { color: #7fb4ff; }
+        /* Cap the render height on every width so it never outgrows the window; app.css handles
+           the wide two-column breakout and its own height cap above 1200px. */
+        #canvas { width: 100%; aspect-ratio: 4/3; max-width: calc(76vh * 4 / 3); margin-inline: auto;
+                  border-radius: 10px; background: #101315; touch-action: none; display: block; }
+        /* Narrow screens: centre the single column. The app caps this via its .content wrapper;
+           the standalone has no .content, so give studio-inner a max width below the breakout. */
+        @media (max-width: 1199px) { .studio-inner { max-width: 1080px; margin: 0 auto; padding: 0 16px; } }
+        /* The JS marks active toggles with .active and the selected light with .selected; the app
+           Razor uses .primary / .selected-part, so bridge those two class names to the app styles. */
+        button.active { background: #2d6cdf; border-color: #2d6cdf; color: #fff; }
+        .card.selected { border-color: #2d6cdf; }
+        /* Drop zone + unread-news badge (standalone-only). */
+        #drop { border: 2px dashed #2d6cdf; border-radius: 10px; padding: 30px 16px; text-align: center;
+                margin: 0 0 12px; cursor: pointer; }
+        #drop.hover { background: #1a2436; }
+        a.unread { color: #ffd27a; } a.unread::after { content: ' ●'; color: #e0a93d; }
+        footer { margin-top: 24px; }
+    </style>
+</head>
+<body>
+<div class="studio-layout">
+<div class="studio-inner">
+
+<header>
+    <h1>Chromatory — Light Studio</h1>
+    <p class="muted small">Plan light placement for NMM and OSL: load the STL you print from, place
+        lights, pick a look, and copy the highlights. Runs entirely in your browser — the model is
+        never uploaded, so any size your machine can handle is fine.
+        · <a href="assembly/" id="assemblyLink" style="display:none">🧩 Assembly workbench</a>
+        · <a href="news.html" id="newsLink">🔔 News</a> · <a href="terms.html">Terms</a></p>
+</header>
+
+<div class="studio-grid">
+<div class="studio-stage">
+    <div id="drop">
+        <b>Drop an STL here</b> or <a href="#" id="pick">choose a file</a>
+        <div class="muted small" id="loadstatus">binary or ASCII STL · stays on your device</div>
+        <input type="file" id="file" accept=".stl" style="display:none" />
+    </div>
+
+    <canvas id="canvas" class="studio-canvas"></canvas>
+    <div class="row">
+        <button class="ghost" id="lockSpec"
+            title="Freeze the highlights as seen from THIS view — orbit freely, they stay put (that's where you'll paint them). Click again to unfreeze.">🔒 Lock highlights</button>
+        <span class="muted small">Orbit with drag/pinch · wheel zooms · tap a handle for X/Y/Z arrows ·
+            <b>Del</b> removes the selected light · <b>Ctrl+Z</b> undoes.</span>
+        <span class="muted small" style="margin-left:auto">Sideways model?</span>
+        <button class="ghost" data-orient="x,1" title="Tip forward">⤵</button>
+        <button class="ghost" data-orient="x,-1" title="Tip back">⤴</button>
+        <button class="ghost" data-orient="y,1" title="Spin a quarter turn">↻</button>
+        <button class="ghost" data-orient="z,1" title="Roll left">⟲</button>
+        <button class="ghost" data-orient="z,-1" title="Roll right">⟳</button>
+        <button class="ghost" id="orientReset" title="Back to how it loaded">Reset</button>
+    </div>
+</div><!-- /studio-stage -->
+
+<div class="studio-panel">
+
+<details class="card section" open>
+    <summary>🎨 Look</summary>
+    <div class="muted small">Responds to your lights:</div>
+    <div class="row" id="looks-live"></div>
+    <div class="muted small">Fixed idealized reference (ignores lights — the shapes to copy):</div>
+    <div class="row" id="looks-fixed"></div>
+    <div class="row">
+        <label>Color <input type="color" id="color" value="#c8ccd2" /></label>
+        <label id="bandsRow" style="display:none">Bands <input type="range" id="bands" min="2" max="8" step="1" value="4" /></label>
+    </div>
+    <div class="row" id="pbrRow">
+        <label>Metal <input type="range" id="metal" min="0" max="1" step="0.05" value="1" /></label>
+        <label>Rough <input type="range" id="rough" min="0.02" max="1" step="0.02" value="0.3" /></label>
+    </div>
+</details>
+
+<details class="card section" open>
+    <summary>💡 Lights</summary>
+    <div class="row">
+        <button data-preset="zenithal">Zenithal</button>
+        <button data-preset="keyrim">Key + rim</button>
+        <button data-preset="candle">Candle-low (fire gradient)</button>
+        <button class="ghost" id="addPoint">+ Point</button>
+        <button class="ghost" id="addDir">+ Directional</button>
+    </div>
+    <div class="row">
+        <label>Ambient <input type="range" id="ambient" min="0" max="0.8" step="0.02" value="0.18" /></label>
+        <span class="muted small">room light — brighten to inspect, dim for dramatic OSL</span>
+    </div>
+    <div class="row">
+        <label>Floor <input type="color" id="floor" value="#4a4136" /></label>
+        <span class="muted small">the table the mini stands on — its colour tints every light's bounce</span>
+    </div>
+    <div class="row">
+        <label><input type="checkbox" id="shadows" checked /> Shadows</label>
+        <span class="muted small">the model blocks light — turn off on weak GPUs</span>
+    </div>
+    <div class="row">
+        <label><input type="checkbox" id="lightDots" checked /> Light source dots</label>
+        <span class="muted small">the glowing orbs where your lights sit — off shows just their light (saved renders follow this)</span>
+    </div>
+    <div class="row" id="shadowTintRow">
+        <label>Shadow colour <input type="color" id="shadowTint" value="#000000" /></label>
+        <label>Strength <input type="range" id="shadowStrength" min="0" max="1" step="0.05" value="1" /></label>
+        <span class="muted small">painters shade toward a colour, not black — try a cool blue-violet</span>
+    </div>
+    <div id="lights"></div>
+</details>
+
+<details class="card section" id="regionsSection">
+    <summary>🖌 Regions</summary>
+    <div class="muted small">Paint areas on the model (armour, cloth, skin…), then light one up on the render.</div>
+    <div class="row">
+        <button class="ghost" id="paintToggle"
+            title="Drag on the model to paint the selected area; right-drag erases; orbit on empty space">🎨 Paint regions</button>
+        <span id="paintTools" style="display:none">
+            <button id="brushTool" class="active" title="Drag to paint with a round brush">🖌 Brush</button>
+            <button id="fillTool" class="ghost"
+                title="Click an area to fill it — spreads until the surface bends past the angle (right-click fills with the eraser)">🪄 Fill</button>
+            <label id="brushSizeRow">Brush <input type="range" id="brushSize" min="0.005" max="0.3" step="0.005" value="0.10"
+                title="Drag left for a fine detail brush — zoom in to clean up region edges"></label>
+            <label id="fillAngleRow" style="display:none">Angle <input type="range" id="fillAngle" min="5" max="60" step="1" value="30"><span id="fillAngleVal">30</span>°</label>
+            <button class="ghost" id="clearRegions" title="Erase every painted region">Clear</button>
+        </span>
+        <span class="muted small" id="regionStatus"></span>
+    </div>
+    <div class="row" id="paletteRow" style="display:none"></div>
+    <details id="paletteEdit" style="display:none;margin-top:4px">
+        <summary class="muted small">Rename / recolour areas</summary>
+        <div id="paletteEditList" style="display:flex;flex-direction:column;gap:4px;margin-top:6px"></div>
+        <button class="ghost" id="addRegion" style="margin-top:6px">+ Add area</button>
+    </details>
+    <div class="row" id="lightUpRow" style="display:none"></div>
+    <div class="row">
+        <button id="saveRegions">💾 Save areas…</button>
+        <button id="loadRegions">📂 Load areas</button>
+        <input type="file" id="regionsFile" accept=".json" style="display:none" />
+    </div>
+</details>
+
+<details class="card section">
+    <summary>💾 Rigs</summary>
+    <div class="muted small">A rig saves everything: lights, look, colour, ambient, floor, shadows — as a JSON file you can reload here or in the app.</div>
+    <div class="row">
+        <button id="saveRig">💾 Save rig…</button>
+        <button id="loadRig">📂 Load rig</button>
+        <input type="file" id="rigFile" accept=".json" style="display:none" />
+    </div>
+</details>
+
+<details class="card section" open>
+    <summary>📸 Capture</summary>
+    <div class="muted small">Save the current render as a PNG — your painting reference.</div>
+    <div class="row">
+        <button class="primary" id="shot">📸 Save render (PNG)</button>
+    </div>
+</details>
+
+<details class="card section" id="sceneSection">
+    <summary>🧩 Scene</summary>
+    <div class="muted small">Add more STLs to light a composed scene (a base, scenery, a second
+        mini). Click one to select it, then drag its gizmo to move or turn it. Scene models are
+        session-only — save a render to keep the composition.</div>
+    <div class="row">
+        <button id="addProp">📂 Add STL</button>
+        <input type="file" id="propFile" accept=".stl" multiple style="display:none" />
+        <span id="propModeButtons" style="display:none">
+            <button id="propMove" class="active" title="Drag to move the selected model">↔ Move</button>
+            <button id="propRotate" class="ghost" title="Drag to turn the selected model">⟳ Rotate</button>
+        </span>
+    </div>
+    <div class="row" id="props"></div>
+</details>
+
+</div><!-- /studio-panel -->
+</div><!-- /studio-grid -->
+
+<footer class="muted small">
+    Part of <b>Chromatory</b>, the local-first assistant for miniature painters.
+    Free to use; your files stay on your device.<br />
+    Sample model: <a href="https://commons.wikimedia.org/wiki/File:Bust_of_Emperor_Caracalla.stl"
+    target="_blank" rel="noopener">Bust of Emperor Caracalla</a> — CC0 3D scan via Wikimedia Commons.
+</footer>
+
+</div><!-- /studio-inner -->
+</div><!-- /studio-layout -->
+
+<script type="module">
+    import * as studio from './js/lightstudio.js';
+
+    // Compile-time feature flags. The deploy script (Publish-StandaloneStudio.ps1) REWRITES this
+    // line per release tier, so options are gated at build time from one page — never a separate
+    // hand-maintained reduced variant. This literal is the Dev default (everything on).
+    // regions: paint areas on the model (armour, cloth, skin…), then glow one on the render.
+    // assembly: links the Assembly workbench (Pro/Dev; published under /assembly/ by the script).
+    // multiStl: the Scene section — add extra STLs as movable props to light a composed scene.
+    const FEATURES = { regions: true, assembly: true, multiStl: true };
+
+    const $ = id => document.getElementById(id);
+    const status = $('loadstatus');
+
+    studio.init($('canvas'));
+    $('assemblyLink').style.display = FEATURES.assembly ? '' : 'none';
+    $('sceneSection').style.display = FEATURES.multiStl ? '' : 'none';
+    $('regionsSection').style.display = FEATURES.regions ? '' : 'none';
+
+    // ---- STL loading (file picker + drag & drop, no size limit — it never leaves the client)
+    async function loadFile(file) {
+        if (!file) return;
+        status.textContent = `reading ${file.name} (${(file.size / 1048576).toFixed(1)} MB)…`;
+        try {
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            status.textContent = 'parsing…';
+            await new Promise(r => setTimeout(r, 30)); // let the status paint before the parse blocks
+            const triangles = studio.loadStl(bytes);
+            status.textContent = `${file.name} — ${triangles.toLocaleString()} triangles`;
+            refreshLights();
+            onModelReplaced();
+        } catch (error) {
+            status.textContent = `couldn't read that STL: ${error.message}`;
+        }
+    }
+    $('pick').addEventListener('click', event => { event.preventDefault(); $('file').click(); });
+    $('file').addEventListener('change', () => loadFile($('file').files[0]));
+    const drop = $('drop');
+    drop.addEventListener('click', event => { if (event.target.id !== 'pick') $('file').click(); });
+    drop.addEventListener('dragover', event => { event.preventDefault(); drop.classList.add('hover'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('hover'));
+    drop.addEventListener('drop', event => {
+        event.preventDefault();
+        drop.classList.remove('hover');
+        loadFile(event.dataTransfer.files[0]);
+    });
+
+    // ---- Looks (single source: studio.LOOKS)
+    let currentLook = 'silvernmm';
+    const appearance = { shader: 'pbr', matcap: 'chrome', toonBands: 4, color: '#c8ccd2',
+        metalness: 1.0, roughness: 0.3, clearcoat: 0, envIntensity: 0.75 };
+
+    function renderLookButtons() {
+        for (const [host, fixed] of [[$('looks-live'), false], [$('looks-fixed'), true]]) {
+            host.innerHTML = '';
+            for (const [key, look] of Object.entries(studio.LOOKS)) {
+                if (look.fixedReference !== fixed) continue;
+                const button = document.createElement('button');
+                button.textContent = look.label;
+                button.className = key === currentLook ? 'active' : '';
+                button.addEventListener('click', () => applyLook(key));
+                host.appendChild(button);
+            }
+        }
+    }
+
+    function applyLook(key) {
+        currentLook = key;
+        Object.assign(appearance, studio.LOOKS[key].appearance);
+        if (studio.LOOKS[key].appearance.color) $('color').value = studio.LOOKS[key].appearance.color;
+        appearance.color = $('color').value;
+        $('metal').value = appearance.metalness ?? 1;
+        $('rough').value = appearance.roughness ?? 0.3;
+        $('bands').value = appearance.toonBands ?? 4;
+        $('bandsRow').style.display = appearance.shader === 'toon' ? '' : 'none';
+        $('pbrRow').style.display = appearance.shader === 'pbr' ? '' : 'none';
+        studio.setAppearance(appearance);
+        renderLookButtons();
+        syncLockButton();
+    }
+
+    function pushAppearance() {
+        appearance.color = $('color').value;
+        appearance.metalness = parseFloat($('metal').value);
+        appearance.roughness = parseFloat($('rough').value);
+        appearance.toonBands = parseInt($('bands').value, 10);
+        appearance.lookKey = currentLook; // rides into saved rigs so a load re-highlights the look
+        studio.setAppearance(appearance);
+    }
+    for (const id of ['color', 'metal', 'rough', 'bands']) $(id).addEventListener('input', pushAppearance);
+
+    // After a rig load (or Ctrl+Z) the ENGINE holds the restored appearance — mirror it back into
+    // the panel instead of letting stale inputs stomp it on the next touch.
+    function syncAppearanceControls() {
+        const a = JSON.parse(studio.getAppearanceJson());
+        Object.assign(appearance, a);
+        if (a.lookKey && studio.LOOKS[a.lookKey]) currentLook = a.lookKey;
+        if (a.color) $('color').value = a.color;
+        $('metal').value = a.metalness ?? 1;
+        $('rough').value = a.roughness ?? 0.3;
+        $('bands').value = a.toonBands ?? 4;
+        $('bandsRow').style.display = a.shader === 'toon' ? '' : 'none';
+        $('pbrRow').style.display = a.shader === 'pbr' ? '' : 'none';
+        renderLookButtons();
+    }
+
+    // ---- Lights
+    function refreshLights() {
+        const list = JSON.parse(studio.getLightsJson());
+        const host = $('lights');
+        host.innerHTML = '';
+        for (const light of list) {
+            const card = document.createElement('div');
+            card.className = light.selected ? 'card selected' : 'card';
+            const gradient = light.type === 'point' ? `
+                <div class="row">
+                    <label>Falloff <input type="range" data-id="${light.id}" data-k="decay" min="0.5" max="3" step="0.1" value="${light.decay}"
+                        title="how fast it dims with distance — high for candles, low for lanterns"></label>
+                    <label><input type="checkbox" data-id="${light.id}" data-k="farTint" ${light.farColor ? 'checked' : ''}> Far tint</label>
+                    ${light.farColor ? `
+                        <input type="color" data-id="${light.id}" data-k="farColor" value="${light.farColor}">
+                        <label>Gradient start <input type="range" data-id="${light.id}" data-k="gradientStart" min="0.08" max="1" step="0.02" value="${light.gradientStart}"
+                            title="where the near colour hands over to the far tint"></label>` : ''}
+                </div>` : '';
+            const sizeControl = light.type === 'point' ? `
+                    <label>Size <input type="range" data-id="${light.id}" data-k="size" min="0" max="24" step="1" value="${light.size}"
+                        title="physical size of the source — bigger gives broader highlights and softer shadow edges"></label>` : '';
+            const bounceRow = `
+                <div class="row">
+                    ${sizeControl}
+                    <label><input type="checkbox" data-id="${light.id}" data-k="bounceOn" ${light.bounceStrength > 0 ? 'checked' : ''}> Bounce</label>
+                    ${light.bounceStrength > 0 ? `
+                        <input type="range" data-id="${light.id}" data-k="bounceStrength" min="0.05" max="1" step="0.05" value="${light.bounceStrength}"
+                            title="how much bounces back up off the floor — the secondary NMM highlight (tinted by the Floor colour)">` : ''}
+                </div>`;
+            card.innerHTML = `
+                <div class="row spread">
+                    <span class="muted small" data-id="${light.id}" data-k="select" style="cursor:pointer"
+                        title="select this light in the view (shows its move arrows)">${light.selected ? '▶ ' : ''}${light.type} light</span>
+                    <div class="row">
+                        <input type="color" data-id="${light.id}" data-k="color" value="${light.color}">
+                        <input type="range" data-id="${light.id}" data-k="intensity" min="0" max="4" step="0.1" value="${light.intensity}" title="Brightness">
+                        <button class="ghost" data-id="${light.id}" data-k="toggle"
+                            title="${light.enabled ? 'switch off (kept in the rig)' : 'switch back on'}">${light.enabled ? '💡' : '🚫'}</button>
+                        <button class="ghost" data-id="${light.id}" data-k="clone" title="duplicate this light with all its settings">⧉</button>
+                        <button class="ghost" data-id="${light.id}" data-k="remove" title="remove (or select it and press Delete)">✕</button>
+                    </div>
+                </div>${gradient}${bounceRow}`;
+            host.appendChild(card);
+        }
+        host.querySelectorAll('[data-k]').forEach(el => {
+            const id = parseInt(el.dataset.id, 10);
+            if (el.dataset.k === 'remove') {
+                el.addEventListener('click', () => { studio.removeLight(id); refreshLights(); });
+                return;
+            }
+            if (el.dataset.k === 'clone') {
+                el.addEventListener('click', () => { studio.cloneLight(id); refreshLights(); });
+                return;
+            }
+            if (el.dataset.k === 'select') {
+                el.addEventListener('click', () => { studio.selectLight(id); refreshLights(); });
+                return;
+            }
+            if (el.dataset.k === 'toggle') {
+                el.addEventListener('click', () => {
+                    const light = JSON.parse(studio.getLightsJson()).find(l => l.id === id);
+                    studio.updateLight(id, { enabled: !light.enabled });
+                    refreshLights();
+                });
+                return;
+            }
+            el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', () => {
+                const lights = JSON.parse(studio.getLightsJson());
+                const light = lights.find(l => l.id === id);
+                const update = { color: light.color, farColor: light.farColor,
+                    intensity: light.intensity, decay: light.decay, gradientStart: light.gradientStart,
+                    bounceStrength: light.bounceStrength, size: light.size };
+                if (el.dataset.k === 'farTint') update.farColor = el.checked ? (light.farColor ?? '#c23f14') : null;
+                else if (el.dataset.k === 'bounceOn') update.bounceStrength = el.checked ? 0.5 : 0;
+                else update[el.dataset.k] = el.type === 'color' ? el.value : parseFloat(el.value);
+                studio.updateLight(id, update);
+                if (el.dataset.k === 'farTint' || el.dataset.k === 'bounceOn') refreshLights(); // sub-controls toggle
+            });
+        });
+    }
+    document.querySelectorAll('[data-orient]').forEach(button =>
+        button.addEventListener('click', () => {
+            const [axis, turns] = button.dataset.orient.split(',');
+            studio.reorient(axis, parseInt(turns, 10));
+        }));
+    $('orientReset').addEventListener('click', () => studio.resetOrientation());
+
+    document.querySelectorAll('[data-preset]').forEach(button =>
+        button.addEventListener('click', () => { studio.applyPreset(button.dataset.preset); refreshLights(); }));
+    $('addPoint').addEventListener('click', () => { studio.addLight('point', {}); refreshLights(); });
+    $('addDir').addEventListener('click', () => { studio.addLight('directional', {}); refreshLights(); });
+    $('ambient').addEventListener('input', () => studio.setEnvironmentLight({ intensity: parseFloat($('ambient').value) }));
+    $('floor').addEventListener('input', () => studio.setFloor({ color: $('floor').value }));
+    $('shadows').addEventListener('change', () => { studio.setShadows($('shadows').checked); syncShadowRow(); });
+    $('lightDots').addEventListener('change', () => {
+        studio.setLightHandlesVisible($('lightDots').checked);
+        refreshLights(); // hiding also deselects; keep the ▶ markers honest
+    });
+
+    // ---- Scene props (multiple STLs, session-only)
+    function refreshProps() {
+        if (!FEATURES.multiStl) return;
+        const list = JSON.parse(studio.listProps());
+        const host = $('props');
+        host.innerHTML = '';
+        for (const prop of list) {
+            const chip = document.createElement('span');
+            chip.className = 'row';
+            chip.style.cssText = 'gap:0;flex-wrap:nowrap';
+            const pick = document.createElement('button');
+            pick.className = prop.selected ? 'active' : 'ghost';
+            pick.textContent = prop.name;
+            pick.title = 'Select to move / turn';
+            pick.addEventListener('click', () => { studio.selectPropById(prop.id); refreshProps(); });
+            const remove = document.createElement('button');
+            remove.className = 'ghost';
+            remove.textContent = '✕';
+            remove.title = 'Remove from the scene';
+            remove.addEventListener('click', () => { studio.deleteProp(prop.id); refreshProps(); });
+            chip.append(pick, remove);
+            host.appendChild(chip);
+        }
+        $('propModeButtons').style.display = list.some(p => p.selected) ? '' : 'none';
+    }
+    if (FEATURES.multiStl) {
+        $('addProp').addEventListener('click', () => $('propFile').click());
+        $('propFile').addEventListener('change', async () => {
+            for (const file of $('propFile').files) {
+                try {
+                    const bytes = new Uint8Array(await file.arrayBuffer());
+                    studio.addStl(bytes, file.name.replace(/\.stl$/i, ''), null, null);
+                } catch (error) {
+                    status.textContent = `couldn't read ${file.name}: ${error.message}`;
+                }
+            }
+            $('propFile').value = '';
+            refreshProps();
+        });
+        const setPropMode = mode => {
+            studio.setPropMode(mode);
+            $('propMove').className = mode === 'translate' ? 'active' : 'ghost';
+            $('propRotate').className = mode === 'rotate' ? 'active' : 'ghost';
+        };
+        $('propMove').addEventListener('click', () => setPropMode('translate'));
+        $('propRotate').addEventListener('click', () => setPropMode('rotate'));
+    }
+
+    // ---- Regions (paint areas on the model, then glow one on the render). Uses the SAME engine
+    // API as the in-app studio; painting persists via Save/Load areas (JSON), not the rig.
+    let palette = [];   // [{ name, color, material, metalness?, roughness? }]
+    let painting = false, brushRegion = 1, fillMode = false, brushRadius = 0.10, fillAngle = 30, highlighted = -1;
+
+    const loadPalette = () => { palette = JSON.parse(studio.getRegionPalette()); };
+    const regionCounts = () => { try { return JSON.parse(studio.getRegionCounts()); } catch { return []; } };
+
+    function pushPalette() {
+        studio.setRegionPalette(JSON.stringify(palette.map(s => ({
+            name: s.name, color: s.color, material: s.material ?? 'look',
+            metalness: s.metalness ?? null, roughness: s.roughness ?? null }))));
+        renderPalette();
+        renderLightUp();
+    }
+
+    function renderPalette() {
+        // Which region the brush paints (+ eraser).
+        const row = $('paletteRow');
+        row.innerHTML = '';
+        palette.forEach((slot, i) => {
+            const idx = i + 1;
+            const button = document.createElement('button');
+            button.className = brushRegion === idx ? 'active' : 'ghost';
+            button.style.borderLeft = `14px solid ${slot.color}`;
+            button.textContent = slot.name;
+            button.title = `Paint with ${slot.name}`;
+            button.addEventListener('click', () => { brushRegion = idx; studio.setBrush({ region: idx }); renderPalette(); });
+            row.appendChild(button);
+        });
+        const eraser = document.createElement('button');
+        eraser.className = brushRegion === 0 ? 'active' : 'ghost';
+        eraser.textContent = 'Eraser';
+        eraser.title = 'Erase back to unpainted';
+        eraser.addEventListener('click', () => { brushRegion = 0; studio.setBrush({ region: 0 }); renderPalette(); });
+        row.appendChild(eraser);
+
+        // Rename / recolour / material per area.
+        const list = $('paletteEditList');
+        list.innerHTML = '';
+        palette.forEach((slot, i) => {
+            const wrap = document.createElement('div');
+            wrap.className = 'row';
+            wrap.style.cssText = 'gap:6px;align-items:center;flex-wrap:wrap';
+
+            const color = document.createElement('input');
+            color.type = 'color'; color.value = slot.color;
+            color.style.cssText = 'width:34px;height:28px;padding:0;border:none;background:none;cursor:pointer';
+            color.addEventListener('input', () => { palette[i].color = color.value; pushPalette(); });
+
+            const name = document.createElement('input');
+            name.type = 'text'; name.value = slot.name; name.style.maxWidth = '150px';
+            name.addEventListener('input', () => { palette[i].name = name.value; pushPalette(); });
+
+            const material = document.createElement('select');
+            material.title = 'How this area reflects light — metal gleams, matte stays flat';
+            for (const [val, txt] of [['look', 'Follow look'], ['matte', 'Matte'], ['satin', 'Satin'], ['gloss', 'Gloss'], ['metal', 'Metal']]) {
+                const opt = document.createElement('option'); opt.value = val; opt.textContent = txt; material.appendChild(opt);
+            }
+            material.value = slot.material ?? 'look';
+            material.addEventListener('change', () => {
+                palette[i].material = material.value; palette[i].metalness = null; palette[i].roughness = null; pushPalette();
+            });
+
+            wrap.append(color, name, material);
+            list.appendChild(wrap);
+        });
+    }
+
+    function renderLightUp() {
+        const counts = regionCounts();
+        const row = $('lightUpRow');
+        row.innerHTML = '';
+        const painted = palette.map((_, i) => i + 1).filter(idx => (counts[idx] ?? 0) > 0);
+        row.style.display = painted.length ? '' : 'none';
+        if (!painted.length) { if (highlighted !== -1) { highlighted = -1; studio.showAllRegions(); } return; }
+        const label = document.createElement('span');
+        label.className = 'muted small'; label.textContent = 'Light up:';
+        row.appendChild(label);
+        for (const idx of painted) {
+            const slot = palette[idx - 1];
+            const button = document.createElement('button');
+            button.className = highlighted === idx ? 'active' : 'ghost';
+            button.style.borderLeft = `12px solid ${slot.color}`;
+            button.textContent = slot.name;
+            button.title = `Glow ${slot.name} on the model`;
+            button.addEventListener('click', () => { highlighted = idx; studio.highlightRegion(idx); renderLightUp(); });
+            row.appendChild(button);
+        }
+        const off = document.createElement('button');
+        off.className = 'ghost'; off.textContent = 'Off'; off.title = 'Turn the glow off';
+        off.addEventListener('click', () => { highlighted = -1; studio.showAllRegions(); renderLightUp(); });
+        row.appendChild(off);
+    }
+
+    // Loading a new STL resets the mask and drops the engine out of paint mode — mirror that here.
+    function onModelReplaced() {
+        if (!FEATURES.regions) return;
+        painting = false; highlighted = -1;
+        $('paintToggle').className = 'ghost';
+        $('paintToggle').textContent = '🎨 Paint regions';
+        $('paintTools').style.display = 'none';
+        $('paletteRow').style.display = 'none';
+        $('paletteEdit').style.display = 'none';
+        renderLightUp();
+    }
+
+    if (FEATURES.regions) {
+        $('paintToggle').addEventListener('click', () => {
+            painting = !painting;
+            studio.setPaintMode(painting);
+            if (painting) studio.setBrush({ region: brushRegion, radius: brushRadius, mode: fillMode ? 'fill' : 'brush', fillAngle });
+            $('paintToggle').className = painting ? 'primary' : 'ghost';
+            $('paintToggle').textContent = painting ? '🎨 Painting — drag paints, right-drag erases' : '🎨 Paint regions';
+            $('paintTools').style.display = painting ? '' : 'none';
+            $('paletteRow').style.display = painting ? '' : 'none';
+            $('paletteEdit').style.display = painting ? '' : 'none';
+            renderPalette();
+            renderLightUp();
+        });
+        const setTool = () => {
+            $('brushTool').className = fillMode ? 'ghost' : 'active';
+            $('fillTool').className = fillMode ? 'active' : 'ghost';
+            $('brushSizeRow').style.display = fillMode ? 'none' : '';
+            $('fillAngleRow').style.display = fillMode ? '' : 'none';
+            studio.setBrush({ radius: brushRadius, mode: fillMode ? 'fill' : 'brush', fillAngle });
+        };
+        $('brushTool').addEventListener('click', () => { fillMode = false; setTool(); });
+        $('fillTool').addEventListener('click', () => { fillMode = true; setTool(); });
+        $('brushSize').addEventListener('input', () => { brushRadius = parseFloat($('brushSize').value); studio.setBrush({ radius: brushRadius }); });
+        $('fillAngle').addEventListener('input', () => {
+            fillAngle = parseInt($('fillAngle').value, 10); $('fillAngleVal').textContent = fillAngle; studio.setBrush({ fillAngle });
+        });
+        $('clearRegions').addEventListener('click', () => { studio.clearRegions(); highlighted = -1; renderLightUp(); });
+        $('addRegion').addEventListener('click', () => {
+            palette.push({ name: `Area ${palette.length + 1}`, color: '#8a8f98', material: 'look' });
+            pushPalette();
+        });
+        $('saveRegions').addEventListener('click', () => {
+            const json = studio.getRegions();
+            if (!json) { $('regionStatus').textContent = 'nothing painted yet'; return; }
+            saveBlob(new Blob([json], { type: 'application/json' }), 'regions.json', 'Painted regions', 'application/json', '.json');
+        });
+        $('loadRegions').addEventListener('click', () => $('regionsFile').click());
+        $('regionsFile').addEventListener('change', async () => {
+            const file = $('regionsFile').files[0];
+            if (!file) return;
+            try { studio.setRegions(await file.text()); loadPalette(); renderPalette(); renderLightUp(); $('regionStatus').textContent = ''; }
+            catch (error) { $('regionStatus').textContent = `couldn't load: ${error.message}`; }
+            $('regionsFile').value = '';
+        });
+        // A finished brush stroke / fill changes the painted counts — refresh the "Light up" row.
+        $('canvas').addEventListener('pointerup', () => { if (painting) renderLightUp(); });
+    }
+
+    function syncShadowRow() {
+        $('shadowTintRow').style.display = $('shadows').checked ? '' : 'none';
+    }
+    const pushShadowTint = () => studio.setShadowTint({
+        color: $('shadowTint').value, strength: parseFloat($('shadowStrength').value) });
+    $('shadowTint').addEventListener('input', pushShadowTint);
+    $('shadowStrength').addEventListener('input', pushShadowTint);
+
+    // Lock highlights: only meaningful for the light-responsive PBR looks (matcap is already a
+    // fixed reference and toon has no specular) — the button hides itself elsewhere.
+    function syncLockButton() {
+        $('lockSpec').style.display = appearance.shader === 'pbr' ? '' : 'none';
+        const locked = studio.getSpecularLock();
+        $('lockSpec').textContent = locked ? '🔒 Highlights locked' : '🔒 Lock highlights';
+        $('lockSpec').className = locked ? 'active' : 'ghost';
+    }
+    $('lockSpec').addEventListener('click', () => {
+        studio.setSpecularLock(!studio.getSpecularLock());
+        syncLockButton();
+    });
+
+    // ---- Rigs (download/upload JSON — no server here) & capture
+    // Save via a real "Save As" dialog (File System Access API) where the browser supports it —
+    // the user picks the folder and name. Falls back to a plain download (Firefox/older Safari).
+    async function saveBlob(blob, suggestedName, description, mime, ext) {
+        if (window.showSaveFilePicker) {
+            try {
+                const handle = await window.showSaveFilePicker({
+                    suggestedName,
+                    types: [{ description, accept: { [mime]: [ext] } }]
+                });
+                const writable = await handle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                return;
+            } catch (error) {
+                if (error.name === 'AbortError') return; // user cancelled the dialog
+                // Any other failure (rare) falls through to the download path.
+            }
+        }
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = suggestedName;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    }
+
+    $('saveRig').addEventListener('click', () => {
+        const blob = new Blob([studio.getSetup()], { type: 'application/json' });
+        saveBlob(blob, 'light-rig.json', 'Light rig', 'application/json', '.json');
+    });
+    $('loadRig').addEventListener('click', () => $('rigFile').click());
+    function syncEngineControls() {
+        $('ambient').value = studio.getAmbientIntensity();
+        $('floor').value = studio.getFloorColor();
+        $('shadows').checked = studio.getShadows();
+        $('lightDots').checked = studio.getLightHandlesVisible();
+        const tint = JSON.parse(studio.getShadowTint());
+        $('shadowTint').value = tint.color;
+        $('shadowStrength').value = tint.strength;
+        syncAppearanceControls(); // rigs restore the LOOK too — the panel must follow
+        syncShadowRow();
+        syncLockButton();
+        refreshLights();
+        refreshProps();
+        if (FEATURES.regions) renderLightUp(); // undo of a stroke changes the painted counts
+    }
+
+    $('rigFile').addEventListener('change', async () => {
+        const file = $('rigFile').files[0];
+        if (!file) return;
+        studio.applySetup(await file.text());
+        syncEngineControls();
+    });
+    $('shot').addEventListener('click', async () => {
+        const blob = await (await fetch(studio.screenshot())).blob();
+        saveBlob(blob, 'light-study.png', 'PNG image', 'image/png', '.png');
+    });
+
+    // Canvas-initiated changes (Delete key, Ctrl+Z undo) — resync every control that mirrors
+    // engine state, same set as after loading a rig.
+    studio.setChangeCallback(syncEngineControls);
+
+    applyLook('silvernmm');
+    refreshLights();
+    refreshProps();
+    syncShadowRow();
+    if (FEATURES.regions) { loadPalette(); renderPalette(); renderLightUp(); }
+
+    // News badge: highlighted until the news page for this version has been opened once.
+    if (localStorage.getItem('pb-news-seen') !== '2026-07-14') $('newsLink').classList.add('unread');
+
+    // First visit: load the sample bust (CC0) so the page demonstrates itself — replaced the
+    // moment the visitor drops their own STL. Fetched after init so the UI paints first.
+    let userLoadedFile = false;
+    const markUserLoad = () => { userLoadedFile = true; };
+    $('file').addEventListener('change', markUserLoad);
+    drop.addEventListener('drop', markUserLoad);
+    (async () => {
+        try {
+            status.textContent = 'loading the sample bust…';
+            const response = await fetch('sample/caracalla.stl');
+            if (!response.ok) throw new Error(response.statusText);
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            if (userLoadedFile) return; // the visitor beat us to it with their own model
+            const triangles = studio.loadStl(bytes);
+            refreshLights();
+            onModelReplaced();
+            status.textContent = `sample: Bust of Emperor Caracalla (CC0) — ${triangles.toLocaleString()} triangles · drop your own STL to replace`;
+        } catch {
+            status.textContent = 'binary or ASCII STL · stays on your device';
+        }
+    })();
+</script>
+</body>
+</html>
