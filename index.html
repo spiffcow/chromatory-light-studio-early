@@ -220,7 +220,8 @@
     // regions: paint areas on the model (armour, cloth, skin…), then glow one on the render.
     // assembly: links the Assembly workbench (Pro/Dev; published under /assembly/ by the script).
     // multiStl: the Scene section — add extra STLs as movable props to light a composed scene.
-    const FEATURES = { regions: true, assembly: true, multiStl: true };
+    // gemFinish: the Gem region material (inverted transmission look) — early-access first.
+    const FEATURES = { regions: true, assembly: true, multiStl: true, gemFinish: true };
 
     const $ = id => document.getElementById(id);
     const status = $('loadstatus');
@@ -466,7 +467,7 @@
 
     // ---- Regions (paint areas on the model, then glow one on the render). Uses the SAME engine
     // API as the in-app studio; painting persists via Save/Load areas (JSON), not the rig.
-    let palette = [];   // [{ name, color, material, metalness?, roughness? }]
+    let palette = [];   // [{ name, color, material, metalness?, roughness?, gemPower?, gemGain? }]
     let painting = false, brushRegion = 1, fillMode = false, brushRadius = 0.10, fillAngle = 30, highlighted = -1;
 
     const loadPalette = () => { palette = JSON.parse(studio.getRegionPalette()); };
@@ -475,7 +476,8 @@
     function pushPalette() {
         studio.setRegionPalette(JSON.stringify(palette.map(s => ({
             name: s.name, color: s.color, material: s.material ?? 'look',
-            metalness: s.metalness ?? null, roughness: s.roughness ?? null }))));
+            metalness: s.metalness ?? null, roughness: s.roughness ?? null,
+            gemPower: s.gemPower ?? null, gemGain: s.gemGain ?? null }))));
         renderPalette();
         renderLightUp();
     }
@@ -519,8 +521,11 @@
             name.addEventListener('input', () => { palette[i].name = name.value; pushPalette(); });
 
             const material = document.createElement('select');
-            material.title = 'How this area reflects light — metal gleams, matte stays flat';
-            for (const [val, txt] of [['look', 'Follow look'], ['matte', 'Matte'], ['satin', 'Satin'], ['gloss', 'Gloss'], ['metal', 'Metal']]) {
+            material.title = 'How this area reflects light — metal gleams, matte stays flat' +
+                (FEATURES.gemFinish ? ', gem lights up on the side away from the light' : '');
+            const finishes = [['look', 'Follow look'], ['matte', 'Matte'], ['satin', 'Satin'], ['gloss', 'Gloss'], ['metal', 'Metal']];
+            if (FEATURES.gemFinish) finishes.push(['gem', 'Gem']);
+            for (const [val, txt] of finishes) {
                 const opt = document.createElement('option'); opt.value = val; opt.textContent = txt; material.appendChild(opt);
             }
             material.value = slot.material ?? 'look';
@@ -529,6 +534,28 @@
             });
 
             wrap.append(color, name, material);
+
+            // Per-gem tuning (engine falls back to the shared gem defaults while these are blank).
+            // 'change' not 'input': pushPalette re-renders this list, which would steal focus mid-typing.
+            if (FEATURES.gemFinish && (slot.material ?? 'look') === 'gem') {
+                for (const [key, text, title, min, max, step, fallback] of [
+                    ['gemPower', 'Window', "THIS gem's window tightness (how tightly the lit window hugs the far side)", 0.2, 4, 0.05, 1.35],
+                    ['gemGain', 'Glow', "THIS gem's glow strength", 0, 6, 0.1, 2.4]]) {
+                    const lab = document.createElement('label');
+                    lab.className = 'small'; lab.title = title; lab.textContent = text + ' ';
+                    const num = document.createElement('input');
+                    num.type = 'number'; num.min = min; num.max = max; num.step = step;
+                    num.style.width = '70px';
+                    num.value = slot[key] ?? fallback;
+                    num.addEventListener('change', () => {
+                        const v = parseFloat(num.value);
+                        palette[i][key] = Number.isFinite(v) ? Math.min(max, Math.max(min, v)) : null;
+                        pushPalette();
+                    });
+                    lab.appendChild(num);
+                    wrap.appendChild(lab);
+                }
+            }
             list.appendChild(wrap);
         });
     }
@@ -709,7 +736,7 @@
     if (FEATURES.regions) { loadPalette(); renderPalette(); renderLightUp(); }
 
     // News badge: highlighted until the news page for this version has been opened once.
-    if (localStorage.getItem('pb-news-seen') !== '2026-07-14') $('newsLink').classList.add('unread');
+    if (localStorage.getItem('pb-news-seen') !== '2026-07-17') $('newsLink').classList.add('unread');
 
     // First visit: load the sample bust (CC0) so the page demonstrates itself — replaced the
     // moment the visitor drops their own STL. Fetched after init so the UI paints first.

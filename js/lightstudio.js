@@ -230,6 +230,9 @@ function onKeyDown(event) {
 // page (via getLooksJson) and the standalone Light Studio. Values tuned on a real 3M-triangle
 // print (2026-07). "color" omitted = keep the user's current color when switching looks.
 export const LOOKS = {
+    // The NMM looks use plain PBR metal (the user's preference after trying the painted-ramp
+    // shader). The painterly 'nmm' shader stays fully functional — the materials editor creates
+    // painted-NMM materials on demand, and rigs saved with one keep rendering it.
     silvernmm: { label: 'Silver NMM', fixedReference: false,
         appearance: { shader: 'pbr', color: '#c8ccd2', metalness: 1.0, roughness: 0.3, clearcoat: 0, envIntensity: 0.75 } },
     goldnmm: { label: 'Gold NMM', fixedReference: false,
@@ -267,8 +270,9 @@ let paintMaterial = null;
 
 // Current appearance state (kept so shader switches preserve color etc., and for getSetup()).
 const appearance = {
-    shader: 'pbr',          // 'pbr' | 'phong' | 'matcap' | 'toon'
+    shader: 'pbr',          // 'pbr' | 'phong' | 'matcap' | 'toon' | 'nmm'
     matcap: 'chrome',
+    nmmMetal: 'steel',      // nmm: which authored ramp ('steel' | 'gold')
     toonBands: 4,
     color: '#c8ccd2',       // Silver NMM default (matches LightStudio.razor's default look)
     specular: '#ffffff',    // phong: hotspot color
@@ -462,6 +466,82 @@ function resize() {
 // Model
 // ---------------------------------------------------------------------------------------------
 
+// STLs are a triangle soup — no shared vertices — so computeVertexNormals can only produce FLAT
+// facet normals. Dense prints hide that, but the studio-LOD decimation leaves a small feature
+// (a gemstone, a rivet) only a handful of large triangles, and the high-gradient looks (the gem
+// window, sharp speculars) make the facets glaring. Weld normals across bit-identical positions,
+// area-weighted, keeping edges sharper than the crease angle hard. Everything happens IN PLACE:
+// vertex count and order are untouched, so saved region masks (keyed to position.count) and the
+// paint/fill topology stay valid.
+function smoothSoupNormals(geometry, creaseDeg = 60) {
+    const pos = geometry.attributes.position;
+    const n = pos.count;
+    // The cap is a MEMORY/load-time guard only, never a visual judgement — zoomed in, facets show
+    // at any density (a 1.4M-triangle studio mesh still facets on a gemstone filling the screen).
+    // The typed-array weld below handles studio-size meshes in well under a second.
+    if (!n || n % 3 !== 0 || n > 15_000_000) { geometry.computeVertexNormals(); return; }
+
+    const a = pos.array;
+    const triCount = n / 3;
+    const fn = new Float32Array(triCount * 3);   // area-weighted face normal (unnormalized cross)
+    const fnu = new Float32Array(triCount * 3);  // unit face normal, for the crease test
+    for (let t = 0; t < triCount; t++) {
+        const i = t * 9;
+        const ux = a[i + 3] - a[i], uy = a[i + 4] - a[i + 1], uz = a[i + 5] - a[i + 2];
+        const vx = a[i + 6] - a[i], vy = a[i + 7] - a[i + 1], vz = a[i + 8] - a[i + 2];
+        const cx = uy * vz - uz * vy, cy = uz * vx - ux * vz, cz = ux * vy - uy * vx;
+        fn[t * 3] = cx; fn[t * 3 + 1] = cy; fn[t * 3 + 2] = cz;
+        const l = Math.sqrt(cx * cx + cy * cy + cz * cz) || 1;
+        fnu[t * 3] = cx / l; fnu[t * 3 + 1] = cy / l; fnu[t * 3 + 2] = cz / l;
+    }
+
+    // Weld corners sharing bit-identical positions (STL duplicates are exact copies). All typed
+    // arrays — a string-keyed Map dies of GC at millions of vertices. Open hash over the position
+    // bits; only group LEADERS sit in the collision chains, members hang off their leader.
+    const bits = new Int32Array(a.buffer, a.byteOffset, n * 3);
+    let cap = 1; while (cap < n * 2) cap <<= 1;
+    const hmask = cap - 1;
+    const head = new Int32Array(cap).fill(-1);  // hash slot → first leader in the chain
+    const hnext = new Int32Array(n);            // leader → next leader in the same slot
+    const mfirst = new Int32Array(n);           // leader → first member of its group
+    const mnext = new Int32Array(n);            // member → next member (−1 ends)
+    for (let i = 0; i < n; i++) {
+        const x = bits[i * 3], y = bits[i * 3 + 1], z = bits[i * 3 + 2];
+        const h = (Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) & hmask;
+        let leader = -1;
+        for (let j = head[h]; j !== -1; j = hnext[j]) {
+            if (bits[j * 3] === x && bits[j * 3 + 1] === y && bits[j * 3 + 2] === z) { leader = j; break; }
+        }
+        if (leader === -1) {
+            hnext[i] = head[h]; head[h] = i;    // new leader
+            mfirst[i] = i; mnext[i] = -1;
+        } else {
+            mnext[i] = mfirst[leader]; mfirst[leader] = i;  // prepend to the group
+            mfirst[i] = -2;                      // mark as non-leader
+        }
+    }
+
+    const cosCrease = Math.cos(creaseDeg * Math.PI / 180);
+    const out = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+        if (mfirst[i] === -2) continue;          // members are written when their leader is visited
+        for (let c = mfirst[i]; c !== -1; c = mnext[c]) {
+            const t0 = ((c / 3) | 0) * 3;
+            let x = 0, y = 0, z = 0;
+            for (let c2 = mfirst[i]; c2 !== -1; c2 = mnext[c2]) {
+                const t2 = ((c2 / 3) | 0) * 3;
+                // Average only faces on this corner's smoothing side of the crease.
+                if (fnu[t0] * fnu[t2] + fnu[t0 + 1] * fnu[t2 + 1] + fnu[t0 + 2] * fnu[t2 + 2] > cosCrease) {
+                    x += fn[t2]; y += fn[t2 + 1]; z += fn[t2 + 2];
+                }
+            }
+            const l = Math.sqrt(x * x + y * y + z * z) || 1;
+            out[c * 3] = x / l; out[c * 3 + 1] = y / l; out[c * 3 + 2] = z / l;
+        }
+    }
+    geometry.setAttribute('normal', new THREE.BufferAttribute(out, 3));
+}
+
 export function loadStl(bytes) {
     if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
     resetRegions(); // a new geometry invalidates any painted mask (before the material rebuild reads attr state)
@@ -471,7 +551,7 @@ export function loadStl(bytes) {
     paintMaterial = null;
 
     const geometry = new STLLoader().parse(bytes.buffer ?? bytes);
-    geometry.computeVertexNormals();
+    smoothSoupNormals(geometry); // welded, crease-aware normals — see above
     geometry.center();
 
     // STLs come in arbitrary units/orientation; many are Z-up. Normalise: Y-up, ~80 units tall,
@@ -599,8 +679,37 @@ const MATCAPS = {
 // most normals into a muddy mid-tone. Key specular lobe upper-left, small fill lower-right.
 function matcapTexture(name) {
     if (matcapCache.has(name)) return matcapCache.get(name);
-    const p = MATCAPS[name] ?? MATCAPS.chrome;
+    const texture = generateMatcap(MATCAPS[name] ?? MATCAPS.chrome);
+    matcapCache.set(name, texture);
+    return texture;
+}
 
+/// A custom matcap recipe (hex colours) → texture, cached by content. Matcap canvases hold raw
+/// sRGB bytes, so hex converts by simple byte split — no linear round-trip.
+function matcapTextureFromDef(def) {
+    const key = JSON.stringify(def);
+    if (matcapCache.has(key)) return matcapCache.get(key);
+    const toRaw = (hex, fallback) => {
+        if (Array.isArray(hex)) return hex;
+        if (typeof hex !== 'string') return fallback;
+        const n = parseInt(hex.replace('#', ''), 16);
+        return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
+    };
+    const base = MATCAPS.chrome;
+    const p = {
+        skyTop: toRaw(def.skyTop, base.skyTop), skyHorizon: toRaw(def.skyHorizon, base.skyHorizon),
+        groundHorizon: toRaw(def.groundHorizon, base.groundHorizon), groundBottom: toRaw(def.groundBottom, base.groundBottom),
+        horizon: def.horizon ?? base.horizon, horizonSoft: def.horizonSoft ?? base.horizonSoft,
+        spec: def.spec ?? base.spec, specPower: def.specPower ?? base.specPower,
+        bounce: def.bounce ?? base.bounce, edge: def.edge ?? base.edge,
+        specColor: def.specColor !== undefined ? toRaw(def.specColor, [1, 1, 1]) : undefined
+    };
+    const texture = generateMatcap(p);
+    matcapCache.set(key, texture);
+    return texture;
+}
+
+function generateMatcap(p) {
     const size = 256;
     const c = document.createElement('canvas');
     c.width = c.height = size;
@@ -655,13 +764,132 @@ function matcapTexture(name) {
     g.putImageData(image, 0, 0);
     const texture = new THREE.CanvasTexture(c);
     texture.colorSpace = THREE.SRGBColorSpace;
-    matcapCache.set(name, texture);
-    return texture;
+    return texture; // callers cache (by preset name or by def content)
 }
 
 function normalize(v) {
     const l = Math.hypot(v[0], v[1], v[2]);
     return [v[0] / l, v[1] / l, v[2] / l];
+}
+
+// ---------------------------------------------------------------------------------------------
+// Painterly NMM ramps — what "really well done NMM" actually is: the DIFFUSE response is an
+// authored, hue-shifting colour ramp (gold shades through chocolate → rust → orange → yellow →
+// ivory; steel through blue-black → slate → steel → white), never one hue scaled by light. The
+// ramp is driven by the accumulated light so it still FOLLOWS the user's placed lights (the
+// studio's whole point), with a re-thresholded crisp hotspot and a painter's silhouette lining.
+// Tuned against 'Eavy Metal-grade reference photos (2026-07).
+// ---------------------------------------------------------------------------------------------
+// The light→ramp mapping is a Reinhard knee (t = x/(x+knee)) rather than a linear clamp: a
+// linear mapping was tuned to ONE scene's light level and collapsed to all-shadow (or all-top)
+// under the user's own rigs. The knee keeps mids in the middle across a wide brightness range;
+// gain rides as a LIVE uniform behind the Response slider for per-rig taste.
+const NMM_RAMPS = {
+    steel: {
+        stops: [
+            [0.00, [0.043, 0.051, 0.086]],  // blue-black lining
+            [0.22, [0.118, 0.145, 0.212]],  // dark slate
+            [0.50, [0.345, 0.388, 0.463]],  // mid steel, blue-grey
+            [0.80, [0.663, 0.729, 0.831]],  // pale steel
+            [1.00, [0.910, 0.949, 1.000]]   // sky-white
+        ],
+        spec: [1.0, 1.0, 1.0], specLo: 0.10, specHi: 0.30, edge: 0.55, gain: 1.0, knee: 0.40, skyDown: 0.12, contrast: 1.45
+    },
+    gold: {
+        stops: [
+            [0.00, [0.078, 0.031, 0.016]],  // chocolate-brown lining
+            [0.22, [0.355, 0.145, 0.035]],  // sienna brown
+            [0.50, [0.718, 0.373, 0.055]],  // orange gold
+            [0.80, [0.945, 0.718, 0.235]],  // yellow gold
+            [1.00, [1.000, 0.933, 0.690]]   // pale gold
+        ],
+        spec: [1.0, 0.97, 0.87], specLo: 0.10, specHi: 0.30, edge: 0.50, gain: 1.0, knee: 0.40, skyDown: 0.12, contrast: 1.45
+    }
+};
+
+// Gem-shader knobs (region gems light through uGemPow/uGemGain uniforms). Editable through the
+// materials editor; ride in `appearance` (gemPower/gemGain) so rigs save them.
+const gemParams = { power: 1.35, gain: 2.4 };
+
+function syncGemParams() {
+    // Global gem defaults are baked into the per-vertex attribute (slots without their own
+    // values inherit them), so a change refills the buffer — a few ms even on dense prints.
+    repaintColors();
+}
+
+/// A custom NMM ramp def (hex colours, editor-friendly) → the linear-space numbers the patch
+/// bakes. Colours pass through THREE.Color so the sRGB→linear conversion matches the renderer.
+function resolveNmmDef() {
+    const custom = appearance.nmmRamp;
+    if (!custom || !Array.isArray(custom.stops) || custom.stops.length < 2)
+        return { def: NMM_RAMPS[appearance.nmmMetal] ?? NMM_RAMPS.steel, key: `builtin-${appearance.nmmMetal}` };
+    const toLin = hex => { const c = new THREE.Color(hex); return [c.r, c.g, c.b]; };
+    const def = {
+        stops: custom.stops.map(s => [Number(s[0]) || 0, Array.isArray(s[1]) ? s[1] : toLin(s[1])]),
+        spec: Array.isArray(custom.spec) ? custom.spec : toLin(custom.spec ?? '#ffffff'),
+        specLo: custom.specLo ?? 0.10, specHi: custom.specHi ?? 0.30,
+        edge: custom.edge ?? 0.5, gain: custom.gain ?? 1.0, knee: custom.knee ?? 0.40,
+        skyDown: custom.skyDown ?? 0.12, contrast: custom.contrast ?? 1.45
+    };
+    return { def, key: JSON.stringify(custom) };
+}
+
+/// Turns a Phong material into the painterly-NMM shader: light intensity → authored ramp,
+/// specular → thresholded hotspot, silhouette → dark lining. Chains AFTER the studio patches
+/// (lock-specular keeps working: it redirects the view vector the Phong specular term uses).
+function applyNmmRampPatch(material, p, cacheKey, hasRegions = false) {
+    const f = n => n.toFixed(4);
+    const vec3 = c => `vec3(${f(c[0])}, ${f(c[1])}, ${f(c[2])})`;
+    const prevCompile = material.onBeforeCompile;
+    material.onBeforeCompile = shader => {
+        if (prevCompile) prevCompile(shader);
+        shader.uniforms.uNmmGain = { value: p.gain * (appearance.nmmGain ?? 1) };
+        shader.uniforms.uNmmContrast = { value: p.contrast * (appearance.nmmContrast ?? 1) };
+        shader.uniforms.uNmmTint = { value: new THREE.Color(appearance.color ?? '#ffffff') };
+        shader.fragmentShader = shader.fragmentShader
+            .replace('void main() {', 'uniform float uNmmGain;\nuniform float uNmmContrast;\nuniform vec3 uNmmTint;\nvoid main() {')
+            .replace('#include <opaque_fragment>', `
+            {
+                const vec3 NMM_LUMA = vec3(0.2126, 0.7152, 0.0722);
+                // Direct light carries the form; ambient fill is down-weighted so it lifts the
+                // shadows a little without flattening the whole ramp toward one value.
+                float nmmX = (dot(reflectedLight.directDiffuse, NMM_LUMA)
+                            + 0.45 * dot(reflectedLight.indirectDiffuse, NMM_LUMA)) * uNmmGain;
+                // Reinhard knee: scene-brightness robust — mids stay mids whether the rig is a
+                // candle or a floodlight, instead of the whole model sliding to one ramp end.
+                float nmmT = nmmX / (nmmX + ${f(p.knee)});
+                // Sky-down: up-facing surfaces brighten, down-facing darken — the vertical logic
+                // painters grade EVERY plate with, so flat-lit plates still carry a gradient.
+                vec3 nmmWorldN = inverseTransformDirection(normal, viewMatrix);
+                nmmT = pow(clamp(nmmT + nmmWorldN.y * ${f(p.skyDown)}, 0.0, 1.0), uNmmContrast);
+                vec3 nmmC = mix(${vec3(p.stops[0][1])}, ${vec3(p.stops[1][1])}, smoothstep(${f(p.stops[0][0])}, ${f(p.stops[1][0])}, nmmT));
+                nmmC = mix(nmmC, ${vec3(p.stops[2][1])}, smoothstep(${f(p.stops[1][0])}, ${f(p.stops[2][0])}, nmmT));
+                nmmC = mix(nmmC, ${vec3(p.stops[3][1])}, smoothstep(${f(p.stops[2][0])}, ${f(p.stops[3][0])}, nmmT));
+                nmmC = mix(nmmC, ${vec3(p.stops[4][1])}, smoothstep(${f(p.stops[3][0])}, ${f(p.stops[4][0])}, nmmT));
+                float nmmNdV = clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);
+                // Painter's lining: silhouettes fall to the shadow colour instead of catching light.
+                nmmC = mix(nmmC, ${vec3(p.stops[0][1])}, pow(1.0 - nmmNdV, 3.0) * ${f(p.edge)});
+                // The colour picker TINTS the ramp (white = the authored metal untouched).
+                nmmC *= uNmmTint;
+                // The crisp painted hotspot: re-threshold the specular so it reads as a deliberate
+                // mark — and mask it away from grazing angles, where the physical Fresnel term
+                // otherwise smears it into a satin sheen along silhouettes.
+                float nmmSpec = smoothstep(${f(p.specLo)}, ${f(p.specHi)}, dot(reflectedLight.directSpecular, NMM_LUMA))
+                              * smoothstep(0.30, 0.55, nmmNdV);
+                vec3 nmmOut = nmmC + nmmSpec * ${vec3(p.spec)};
+                ${hasRegions
+                    // Painted regions keep the standard physical result (their tint, per-region
+                    // surface, gem behaviour); the ramp claims only unpainted fragments, with the
+                    // soft region boundary blending between the two.
+                    ? 'outgoingLight = mix(nmmOut, outgoingLight, smoothstep(0.0, 0.5, vRegionSurf.w));'
+                    : 'outgoingLight = nmmOut;'}
+            }
+            #include <opaque_fragment>`);
+        material.userData.nmmShader = shader;
+    };
+    const prevKey = material.customProgramCacheKey?.();
+    material.customProgramCacheKey = () => `${prevKey ?? ''}|nmm-${cacheKey}`;
+    return material;
 }
 
 const toonCache = new Map();
@@ -794,8 +1022,12 @@ function buildMaterial(withRegions = true) {
     switch (appearance.shader) {
         case 'matcap': {
             // Fixed idealized reflection — deliberately IGNORES the scene lights, and skips tone
-            // mapping so the authored reference colors arrive on screen untouched.
-            const material = new THREE.MeshMatcapMaterial({ color, matcap: matcapTexture(appearance.matcap) });
+            // mapping so the authored reference colors arrive on screen untouched. A custom
+            // recipe (materials editor) takes precedence over the preset name.
+            const texture = appearance.matcapDef && typeof appearance.matcapDef === 'object'
+                ? matcapTextureFromDef(appearance.matcapDef)
+                : matcapTexture(appearance.matcap);
+            const material = new THREE.MeshMatcapMaterial({ color, matcap: texture });
             material.toneMapped = false;
             return material;
         }
@@ -814,6 +1046,26 @@ function buildMaterial(withRegions = true) {
                 specular: new THREE.Color(appearance.specular ?? '#ffffff'),
                 shininess: appearance.shininess ?? 90
             }));
+        case 'nmm': {
+            // Painterly NMM on the PHYSICAL material (metalness 0 = Lambert diffuse), so the
+            // region patch attaches exactly as it does for the pbr looks: painted regions keep
+            // their tints, per-region surfaces, and gem behaviour, while UNPAINTED fragments get
+            // the authored ramp. The base colour is WHITE so the lit result measures pure light
+            // response; tone mapping is skipped so ramp colours arrive on screen untouched.
+            // Roughness gives a broad specular lobe the patch re-thresholds into a crisp painted
+            // hotspot (a tight lobe would miss every camera-facing plane and never show).
+            const hasRegions = withRegions && !!regionSurfAttr;
+            const material = applyStudioShaderPatches(new THREE.MeshPhysicalMaterial({
+                color: '#ffffff',
+                metalness: 0,
+                roughness: 0.30,
+                envMapIntensity: (appearance.envIntensity ?? 0.75) * ambientEnvScale()
+            }));
+            const { def, key } = resolveNmmDef();
+            applyNmmRampPatch(material, def, key + (hasRegions ? '|regions' : ''), hasRegions);
+            material.toneMapped = false;
+            return hasRegions ? applyRegionSurfacePatch(material, true) : material;
+        }
         default: {
             const material = applyStudioShaderPatches(new THREE.MeshPhysicalMaterial({
                 color,
@@ -867,9 +1119,25 @@ export function setEnvironmentLight(options) {
     if (options.ground !== undefined) hemi.groundColor.set(options.ground);
 }
 
+// Appearance keys that drive LIVE uniforms: changing only these updates values in place —
+// no material rebuild, no shader recompile — so their sliders stay smooth to drag.
+const LIVE_APPEARANCE_KEYS = new Set(['gemPower', 'gemGain', 'nmmGain', 'nmmContrast']);
+
 export function setAppearance(update) {
     captureUndo('appearance', true);
     Object.assign(appearance, update);
+    if (update.gemPower !== undefined) gemParams.power = Math.max(0.2, Number(update.gemPower) || 1.35);
+    if (update.gemGain !== undefined) gemParams.gain = Math.max(0, Number(update.gemGain) || 2.4);
+    if (update.gemPower !== undefined || update.gemGain !== undefined) syncGemParams();
+    if (update.nmmGain !== undefined || update.nmmContrast !== undefined) {
+        const { def } = resolveNmmDef();
+        const shader = lookMaterial?.userData?.nmmShader;
+        if (shader?.uniforms?.uNmmGain) {
+            shader.uniforms.uNmmGain.value = def.gain * Math.max(0.05, Number(appearance.nmmGain) || 1);
+            shader.uniforms.uNmmContrast.value = def.contrast * Math.max(0.2, Number(appearance.nmmContrast) || 1);
+        }
+    }
+    if (Object.keys(update).every(k => LIVE_APPEARANCE_KEYS.has(k))) return;
     // Rebuild the cached look (a real look change is the one legitimate rebuild); in paint mode the
     // flat region material keeps showing and the new look appears on exit via the cache.
     if (mesh) rebuildLookMaterial();
@@ -878,6 +1146,32 @@ export function setAppearance(update) {
         entry.mesh.material.dispose();
         entry.mesh.material = buildMaterial(false);
     }
+}
+
+/// The shipped material recipes (hex colours, editor-friendly) — what the materials editor
+/// pre-fills when the user forks a built-in look into a custom material.
+export function getMaterialDefaultsJson() {
+    const linHex = c => '#' + new THREE.Color().setRGB(c[0], c[1], c[2], THREE.LinearSRGBColorSpace).getHexString();
+    const rawHex = c => '#' + new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace).getHexString();
+    const ramps = {};
+    for (const [name, r] of Object.entries(NMM_RAMPS)) {
+        ramps[name] = {
+            stops: r.stops.map(s => [s[0], linHex(s[1])]), spec: linHex(r.spec),
+            specLo: r.specLo, specHi: r.specHi, edge: r.edge, gain: r.gain, knee: r.knee,
+            skyDown: r.skyDown, contrast: r.contrast
+        };
+    }
+    const matcaps = {};
+    for (const [name, m] of Object.entries(MATCAPS)) {
+        matcaps[name] = {
+            skyTop: rawHex(m.skyTop), skyHorizon: rawHex(m.skyHorizon),
+            groundHorizon: rawHex(m.groundHorizon), groundBottom: rawHex(m.groundBottom),
+            horizon: m.horizon, horizonSoft: m.horizonSoft ?? 0.05, spec: m.spec,
+            specPower: m.specPower, bounce: m.bounce, edge: m.edge ?? 0.35,
+            specColor: rawHex(m.specColor ?? [1, 1, 1])
+        };
+    }
+    return JSON.stringify({ nmmRamps: ramps, matcaps, gem: { power: gemParams.power, gain: gemParams.gain } });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1461,6 +1755,9 @@ let regionsDirty = false;      // unsaved mask/palette edits; the panel offers S
 let regionIndex = null;        // Uint8Array, one per vertex; 0 = unpainted
 let regionColorAttr = null;    // THREE 'color' BufferAttribute on the geometry
 let regionSurfAttr = null;     // per-vertex (use, metalness, roughness) for regions with their own material
+let gemFlagAttr = null;        // per-vertex 0/1: fragment shades as a gem (transmission look). Its own
+                               // byte — multiplexing it into aRegionSurf.w would make interpolation
+                               // at every region border sweep through the gem level and band-glow.
 let isolated = -1;             // region highlighted alone; -1 = show all
 let paintGrid = null;          // uniform spatial grid over vertices, so the brush is O(nearby), not O(all)
 let highlightAttr = null;      // per-vertex 0/1 mask (aHighlight) driving the on-model glow overlay
@@ -1531,6 +1828,10 @@ const REGION_MATERIALS = {
     satin: { metalness: 0.0, roughness: 0.38 },
     gloss: { metalness: 0.0, roughness: 0.15 },
     metal: { metalness: 1.0, roughness: 0.30 },
+    // Gem: transmission look — the shader inverts the diffuse term for these fragments (see the
+    // gem section of applyRegionSurfacePatch), so only the specular settings matter here: low
+    // roughness gives the small sharp light-side sparkle painters put on a stone.
+    gem:   { metalness: 0.0, roughness: 0.16 },
 };
 
 // (materialUse, metalness, roughness, tintUse) in [0,1] for the normalized aRegionSurf attribute —
@@ -1566,22 +1867,54 @@ function applyRegionSurfacePatch(material, useTint) {
 
         shader.vertexShader = shader.vertexShader.replace('void main() {',
             'attribute vec4 aRegionSurf;\nvarying vec4 vRegionSurf;\n' +
+            'attribute vec3 aGemFlag;\nvarying vec3 vGemParams;\n' +
             (useTint ? 'attribute vec3 color;\nvarying vec3 vRegionTint;\n' : '') +
-            'void main() {\n  vRegionSurf = aRegionSurf;' +
+            'void main() {\n  vRegionSurf = aRegionSurf;\n  vGemParams = aGemFlag;' +
             (useTint ? '\n  vRegionTint = color;' : ''));
+
+        // Varyings go at the very TOP of the fragment source (not at void main): the gem term
+        // below lives inside RE_Direct_Physical, a pars function defined before main, and GLSL
+        // resolves names in file order.
+        shader.fragmentShader =
+            'varying vec4 vRegionSurf;\nvarying vec3 vGemParams;\n' +
+            (useTint ? 'varying vec3 vRegionTint;\n' : '') +
+            shader.fragmentShader;
+        material.userData.regionShader = shader;
 
         // The factor assignments live inside unexpanded #includes — expand and patch them, as the
         // lock-specular patch does for the lights chunk.
         shader.fragmentShader = shader.fragmentShader
-            .replace('void main() {',
-                'varying vec4 vRegionSurf;\n' + (useTint ? 'varying vec3 vRegionTint;\n' : '') +
-                'void main() {')
             .replace('#include <metalnessmap_fragment>', THREE.ShaderChunk.metalnessmap_fragment
                 .replace('float metalnessFactor = metalness;',
                     'float metalnessFactor = mix( metalness, vRegionSurf.y, vRegionSurf.x );'))
             .replace('#include <roughnessmap_fragment>', THREE.ShaderChunk.roughnessmap_fragment
                 .replace('float roughnessFactor = roughness;',
                     'float roughnessFactor = mix( roughness, vRegionSurf.z, vRegionSurf.x );'));
+
+        // ---- Gem transmission (per-fragment, driven by vGemParams) ----------------------------
+        // A painted gem lights BACKWARDS: the light enters the stone and exits the far side, so
+        // the area facing the light stays dark (bar a small sharp sparkle) and the area facing
+        // away glows — the "window". Two patches make that happen:
+        //  1. RE_Direct_Physical's diffuse term flips to the far side (pow tightens the window
+        //     toward the far pole; specular keeps the true normal, giving the light-side dot).
+        shader.fragmentShader = shader.fragmentShader
+            .replace('#include <lights_physical_pars_fragment>', THREE.ShaderChunk.lights_physical_pars_fragment
+                .replace('reflectedLight.directDiffuse += irradiance * BRDF_Lambert( material.diffuseColor );',
+                    // Wider lobe than Lambert (window exponent) and a focus boost (glow gain): the
+                    // transmitted window painters put on a stone is broad and MORE saturated-bright
+                    // than a plain lit face. PER-REGION values ride in vGemParams (y: power over
+                    // [0.2,4], z: gain over [0,6] — gemEncode is the writing side).
+                    'vec3 gemIrradiance = pow( saturate( dot( -geometryNormal, directLight.direction ) ), 0.2 + vGemParams.y * 3.8 ) * ( vGemParams.z * 6.0 ) * directLight.color;\n' +
+                    '\treflectedLight.directDiffuse += mix( irradiance, gemIrradiance, vGemParams.x ) * BRDF_Lambert( material.diffuseColor );'))
+        //  2. Gem fragments stop RECEIVING shadows: the window sits on the model's own far side,
+        //     which the shadow map always marks occluded — shadowed transmission would be black.
+        //     The raw receiveShadow condition survives inside the studio patch's shadow-tint
+        //     rewrite (a gem forces its shadow factor to 1, which that mix maps to "unshadowed"),
+        //     so this one replacement works with or without the studio patch applied first; the
+        //     expand below no-ops when the studio patch already expanded the chunk.
+            .replace('#include <lights_fragment_begin>', THREE.ShaderChunk.lights_fragment_begin)
+            .split('( directLight.visible && receiveShadow ) ?')
+            .join('( directLight.visible && receiveShadow && vGemParams.x < 0.5 ) ?');
 
         if (useTint) shader.fragmentShader = shader.fragmentShader
             .replace('#include <color_fragment>',
@@ -1593,7 +1926,7 @@ function applyRegionSurfacePatch(material, useTint) {
     };
     const prevKey = material.customProgramCacheKey;
     material.customProgramCacheKey = () =>
-        (prevKey ? prevKey.call(material) : '') + '|regionsurf' + (useTint ? '+tint' : '');
+        (prevKey ? prevKey.call(material) : '') + '|regionsurf-gem' + (useTint ? '+tint' : '');
     return material;
 }
 
@@ -1605,6 +1938,7 @@ function resetRegions() {
     regionIndex = null;
     regionColorAttr = null;
     regionSurfAttr = null;
+    gemFlagAttr = null;
     paintGrid = null;
     fillTopology = null; // adjacency belongs to the old geometry
     highlightAttr = null;
@@ -1717,21 +2051,40 @@ function ensureRegionBuffers() {
     regionSurfAttr = new THREE.BufferAttribute(new Uint8Array(count * 4), 4, true);
     regionSurfAttr.setUsage(THREE.DynamicDrawUsage);
     mesh.geometry.setAttribute('aRegionSurf', regionSurfAttr);
+    // Three normalized bytes per vertex: x = gem flag, y/z = the slot's window/glow encoded into
+    // [0,1] (see gemEncode) — per-REGION gem character on the GPU for +2 bytes/vertex.
+    gemFlagAttr = new THREE.BufferAttribute(new Uint8Array(count * 3), 3, true);
+    gemFlagAttr.setUsage(THREE.DynamicDrawUsage);
+    mesh.geometry.setAttribute('aGemFlag', gemFlagAttr);
+}
+
+// Encode/decode ranges for the gem attribute — the GLSL decode in applyRegionSurfacePatch MUST
+// match: power spans [0.2, 4.0], gain spans [0, 6].
+function gemEncode(slot) {
+    if (slot?.material !== 'gem') return [0, 0, 0];
+    const power = Math.min(4, Math.max(0.2, slot.gemPower ?? gemParams.power));
+    const gain = Math.min(6, Math.max(0, slot.gemGain ?? gemParams.gain));
+    return [1, (power - 0.2) / 3.8, gain / 6];
 }
 
 function repaintColors() {
     if (!regionColorAttr) return;
     // Palette lookups hoisted: this loops over every vertex of a multi-million-vertex print.
     const surf = regionPalette.map((_, k) => surfFor(k + 1));
+    const gems = regionPalette.map(r => gemEncode(r));
+    const noGem = [0, 0, 0];
     for (let i = 0; i < regionIndex.length; i++) {
         const idx = regionIndex[i];
         const c = regionThreeColors[idx] ?? NEUTRAL;
         regionColorAttr.setXYZ(i, c.r, c.g, c.b);
         const s = idx > 0 ? (surf[idx - 1] ?? [0, 0, 0, 0]) : [0, 0, 0, 0];
         regionSurfAttr.setXYZW(i, s[0], s[1], s[2], s[3]);
+        const g = idx > 0 ? (gems[idx - 1] ?? noGem) : noGem;
+        gemFlagAttr.setXYZ(i, g[0], g[1], g[2]);
     }
     regionColorAttr.needsUpdate = true;
     regionSurfAttr.needsUpdate = true;
+    gemFlagAttr.needsUpdate = true;
 }
 
 function paintAt(worldPoint) {
@@ -1745,6 +2098,7 @@ function paintAt(worldPoint) {
     const paintR = strokeRegion; // brush.region for a left stroke, 0 (erase) for a right-drag
     const c = regionThreeColors[paintR] ?? NEUTRAL;
     const s = surfFor(paintR); // the region's own surface (or none), baked alongside its colour
+    const gemVals = paintR > 0 ? gemEncode(regionPalette[paintR - 1]) : [0, 0, 0]; // gem params ride per-stroke too
     const highlightVal = paintR === isolated ? 1 : 0; // keep an active glow in sync with new paint
 
     const g = paintGrid, bb = g.bb;
@@ -1765,12 +2119,14 @@ function paintAt(worldPoint) {
                 regionIndex[i] = paintR;
                 regionColorAttr.setXYZ(i, c.r, c.g, c.b);
                 regionSurfAttr.setXYZW(i, s[0], s[1], s[2], s[3]);
+                gemFlagAttr.setXYZ(i, gemVals[0], gemVals[1], gemVals[2]);
                 if (highlightAttr) highlightAttr.setX(i, highlightVal);
             }
         }
     }
     regionColorAttr.needsUpdate = true;
     regionSurfAttr.needsUpdate = true;
+    gemFlagAttr.needsUpdate = true;
     if (highlightAttr && isolated >= 0) highlightAttr.needsUpdate = true;
 }
 
@@ -2196,7 +2552,7 @@ function base64ToU8(b64) {
 export function addStl(bytes, name, modelId, transformJson) {
     if (!renderer) return 0;
     const geometry = new STLLoader().parse(bytes.buffer ?? bytes);
-    geometry.computeVertexNormals();
+    smoothSoupNormals(geometry); // same welded normals as the primary model
     geometry.rotateX(-Math.PI / 2);                       // match the model's Z-up→Y-up convention
     geometry.scale(modelScale, modelScale, modelScale);   // keep size relative to the primary model
     geometry.center();                                    // so it rotates about its own centre
@@ -2386,4 +2742,33 @@ export function screenshot() {
     if (axisControl) axisControl.visible = arrowsVisible;
     if (propControl) propControl.visible = propArrowsVisible;
     return dataUrl;
+}
+
+/// Captures the model from `count` evenly-spaced angles around the current view — same rig, same
+/// look — so an image model gets several sides of the SAME sculpt to reason about its 3D form.
+/// The FIRST shot is the current framing (the angle the mockup should be output from); the rest
+/// orbit around it. The camera is restored exactly afterwards. Returns a JSON array of PNG data
+/// URLs. Elevation and distance are held; only the azimuth changes, so every view frames the mini.
+export function captureAngles(count = 4) {
+    if (!renderer || !camera || !controls || count < 1) return JSON.stringify([screenshot()]);
+    const target = controls.target.clone();
+    const savedPos = camera.position.clone();
+    const offset = camera.position.clone().sub(target);
+    const radius = offset.length() || 1;
+    const startAz = Math.atan2(offset.x, offset.z);
+    const y = offset.y;                          // hold elevation
+    const horiz = Math.hypot(offset.x, offset.z); // horizontal ring radius
+    const shots = [];
+    for (let i = 0; i < count; i++) {
+        const az = startAz + (i / count) * Math.PI * 2;
+        camera.position.set(target.x + horiz * Math.sin(az), target.y + y, target.z + horiz * Math.cos(az));
+        camera.lookAt(target);
+        camera.updateMatrixWorld();
+        shots.push(screenshot());
+    }
+    camera.position.copy(savedPos);
+    camera.lookAt(target);
+    controls.update();
+    renderer.render(scene, camera);
+    return JSON.stringify(shots);
 }
