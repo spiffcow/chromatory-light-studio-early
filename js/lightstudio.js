@@ -1383,7 +1383,12 @@ export function addLight(type, options) {
         enabled: options?.enabled !== false // switched off but kept: the dimmed handle stays put
     };
     entry.gizmo.scale.setScalar(1 + entry.size / 8); // the handle hints at the source size
-    if (entry.regionSource !== null && options?.x === undefined) anchorRegionLight(entry);
+    // A region light ALWAYS anchors from the mask — the painted area, not a saved x/y/z, is its
+    // source of truth. (Rigs saved before constellation anchoring carry a stale single-point
+    // position; skipping re-anchor on load left them without their anchors and, if the mask had
+    // changed since saving, floating in the wrong place.) If the mask isn't loaded yet this
+    // no-ops and setRegions → refreshRegionLights re-anchors when it arrives.
+    if (entry.regionSource !== null) anchorRegionLight(entry);
     lights.set(id, entry); // register FIRST: mountLights budgets casters across the whole map
     if (entry.enabled) mountLights(entry);
     else entry.lights = [];
@@ -1411,7 +1416,7 @@ function anchorRegionLight(entry) {
     // Area-weighted triangle samples (strided so multi-million-face regions stay cheap).
     const faceCount = regionIndex.length / 3;
     const stride = Math.max(1, Math.floor(faceCount / 60000));
-    const sx = [], sy = [], sz = [], sw = [];
+    const sx = [], sy = [], sz = [], sw = [], snx = [], sny = [], snz = [];
     let cx = 0, cy = 0, cz = 0, nx = 0, ny = 0, nz = 0, totalW = 0;
     let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let t = 0; t < faceCount; t += stride) {
@@ -1425,6 +1430,7 @@ function anchorRegionLight(entry) {
         const crx = uy * vz - uz * vy, cry = uz * vx - ux * vz, crz = ux * vy - uy * vx;
         const w = Math.max(1e-9, Math.hypot(crx, cry, crz)); // 2× triangle area
         sx.push(x); sy.push(y); sz.push(z); sw.push(w);
+        snx.push(crx); sny.push(cry); snz.push(crz); // area-weighted normal, free from the cross
         cx += x * w; cy += y * w; cz += z * w;
         nx += crx; ny += cry; nz += crz;
         totalW += w;
@@ -1447,7 +1453,7 @@ function anchorRegionLight(entry) {
     const extent = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
     const anchorCount = extent < modelRadius * 0.55 ? 1 : extent < modelRadius * 1.1 ? 2 : 3;
     entry.regionAnchors = anchorCount <= 1 ? null
-        : clusterRegionAnchors(sx, sy, sz, sw, anchorCount, off, entry.gizmo.position);
+        : clusterRegionAnchors(sx, sy, sz, sw, snx, sny, snz, anchorCount, off, entry.gizmo.position);
 
     const slot = regionPalette[k - 1];
     if (slot) entry.color = slot.color;
@@ -1457,7 +1463,10 @@ function anchorRegionLight(entry) {
 /// Area-weighted k-means (farthest-point seeded, a few Lloyd rounds) over a region's triangle
 /// samples. Returns [{offset: Vector3 relative to the handle, share}] with shares summing to 1;
 /// clusters under 3% of the area are dropped (a stray brush dot shouldn't earn its own light).
-function clusterRegionAnchors(sx, sy, sz, sw, K, surfaceOffset, origin) {
+/// Each anchor pushes off along ITS OWN cluster's average surface normal — pushing "up" buried
+/// anchors inside the mesh on vertical and underside regions, which made the emitted light
+/// inconsistent from cluster to cluster.
+function clusterRegionAnchors(sx, sy, sz, sw, snx, sny, snz, K, surfaceOffset, origin) {
     const n = sx.length;
     if (n < K * 4) return null;
 
@@ -1504,21 +1513,25 @@ function clusterRegionAnchors(sx, sy, sz, sw, K, surfaceOffset, origin) {
             if (acc[c][3] > 0) centers[c] = [acc[c][0] / acc[c][3], acc[c][1] / acc[c][3], acc[c][2] / acc[c][3]];
     }
 
-    // Shares + per-cluster surface push-off along the direction from the region's interior
-    // (approximate: from the cluster centroid away from the overall mean — cheap and stable).
+    // Shares + per-cluster push-off along each cluster's own average surface normal, exactly
+    // like the single-anchor path — the anchor floats just off ITS patch of surface.
     const weights = new Array(K).fill(0);
-    for (let i = 0; i < n; i++) weights[assign[i]] += sw[i];
+    const normals = Array.from({ length: K }, () => [0, 0, 0]);
+    for (let i = 0; i < n; i++) {
+        weights[assign[i]] += sw[i];
+        const nAcc = normals[assign[i]];
+        nAcc[0] += snx[i]; nAcc[1] += sny[i]; nAcc[2] += snz[i];
+    }
     const total = weights.reduce((a, b) => a + b, 0) || 1;
     const anchors = [];
     for (let c = 0; c < K; c++) {
         const share = weights[c] / total;
         if (share < 0.03) continue;
-        const dx = centers[c][0] - mx, dy = centers[c][1] - my, dz = centers[c][2] - mz;
-        const dLen = Math.hypot(dx, dy, dz);
-        // Push out along the local outward hint (or straight up for the central cluster).
-        const px = centers[c][0] + (dLen > 1e-6 ? dx / dLen : 0) * surfaceOffset * 0.4;
-        const py = centers[c][1] + (dLen > 1e-6 ? dy / dLen : 1) * surfaceOffset * 0.4 + surfaceOffset * 0.6;
-        const pz = centers[c][2] + (dLen > 1e-6 ? dz / dLen : 0) * surfaceOffset * 0.4;
+        const [cnx, cny, cnz] = normals[c];
+        const nLen = Math.hypot(cnx, cny, cnz) || 1;
+        const px = centers[c][0] + (cnx / nLen) * surfaceOffset;
+        const py = centers[c][1] + (cny / nLen) * surfaceOffset;
+        const pz = centers[c][2] + (cnz / nLen) * surfaceOffset;
         anchors.push({ offset: new THREE.Vector3(px - origin.x, py - origin.y, pz - origin.z), share });
     }
     if (anchors.length < 2) return null;
