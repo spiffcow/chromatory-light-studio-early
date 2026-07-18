@@ -42,6 +42,8 @@
                 margin: 0 0 12px; cursor: pointer; }
         #drop.hover { background: #1a2436; }
         a.unread { color: #ffd27a; } a.unread::after { content: ' ●'; color: #e0a93d; }
+        #promo { background: #1c2126; border: 1px solid #2a3138; border-left: 4px solid #35c4b5;
+                 border-radius: 8px; padding: 8px 14px; margin: 10px 0 4px; font-size: 14px; }
         footer { margin-top: 24px; }
     </style>
 </head>
@@ -55,7 +57,11 @@
         lights, pick a look, and copy the highlights. Runs entirely in your browser — the model is
         never uploaded, so any size your machine can handle is fine.
         · <a href="assembly/" id="assemblyLink" style="display:none">🧩 Assembly workbench</a>
+        · <a href="https://discord.gg/UExX6gPhwM" target="_blank" rel="noopener">💬 Discord</a>
         · <a href="news.html" id="newsLink">🔔 News</a> · <a href="terms.html">Terms</a></p>
+    <div id="promo">See more on <a href="https://www.chromatory.com/" target="_blank"
+        rel="noopener">www.chromatory.com</a> or <a href="https://www.patreon.com/cw/Chromatory/membership"
+        target="_blank" rel="noopener">support me on Patreon</a> ❤️</div>
 </header>
 
 <div class="studio-grid">
@@ -157,6 +163,12 @@
         <button class="ghost" id="addRegion" style="margin-top:6px">+ Add area</button>
     </details>
     <div class="row" id="lightUpRow" style="display:none"></div>
+    <div class="row" id="glowRow" style="display:none">
+        <span class="muted small">Glow light:</span>
+        <select id="glowRegionPick" style="max-width:150px"></select>
+        <button class="ghost" id="addGlowLight"
+                title="A light whose SOURCE is the chosen painted area — it sits just off the area, glows in its colour, and the area itself renders emissive at the light's level (lava, runes, a glowing blade)">✨ + Glow region</button>
+    </div>
     <div class="row">
         <button id="saveRegions">💾 Save areas…</button>
         <button id="loadRegions">📂 Load areas</button>
@@ -221,7 +233,8 @@
     // assembly: links the Assembly workbench (Pro/Dev; published under /assembly/ by the script).
     // multiStl: the Scene section — add extra STLs as movable props to light a composed scene.
     // gemFinish: the Gem region material (inverted transmission look) — early-access first.
-    const FEATURES = { regions: true, assembly: true, multiStl: true, gemFinish: true };
+    // glowRegion: a painted area becomes a light source (lava, runes) — early-access first.
+    const FEATURES = { regions: true, assembly: true, multiStl: true, gemFinish: true, glowRegion: true };
 
     const $ = id => document.getElementById(id);
     const status = $('loadstatus');
@@ -566,6 +579,21 @@
         row.innerHTML = '';
         const painted = palette.map((_, i) => i + 1).filter(idx => (counts[idx] ?? 0) > 0);
         row.style.display = painted.length ? '' : 'none';
+
+        // Glow-region light picker follows the same painted-slot list.
+        if (FEATURES.glowRegion) {
+            $('glowRow').style.display = painted.length ? '' : 'none';
+            const pick = $('glowRegionPick');
+            const previous = pick.value;
+            pick.innerHTML = '';
+            for (const idx of painted) {
+                const option = document.createElement('option');
+                option.value = idx;
+                option.textContent = palette[idx - 1].name;
+                pick.appendChild(option);
+            }
+            if ([...pick.options].some(o => o.value === previous)) pick.value = previous;
+        }
         if (!painted.length) { if (highlighted !== -1) { highlighted = -1; studio.showAllRegions(); } return; }
         const label = document.createElement('span');
         label.className = 'muted small'; label.textContent = 'Light up:';
@@ -644,6 +672,17 @@
         });
         // A finished brush stroke / fill changes the painted counts — refresh the "Light up" row.
         $('canvas').addEventListener('pointerup', () => { if (painting) renderLightUp(); });
+
+        if (FEATURES.glowRegion) {
+            $('addGlowLight').addEventListener('click', () => {
+                const idx = parseInt($('glowRegionPick').value, 10);
+                if (!idx) return;
+                // Same recipe as the app: a fast-falloff point light anchored to the region; the
+                // engine positions it off the area's centroid and renders the area emissive.
+                studio.addLight('point', { regionSource: idx, intensity: 1.4, decay: 2.2 });
+                refreshLights();
+            });
+        }
     }
 
     function syncShadowRow() {

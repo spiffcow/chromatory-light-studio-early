@@ -1421,6 +1421,17 @@ function refreshRegionLights() {
     syncGlowingSlots();
 }
 
+/// The emissive gain a glowing region's SURFACE renders at — the same curve the emitter orbs
+/// use (1 + intensity × 1.5, tone-mapped so a hot core rolls off to white), so the painted area
+/// reads as the actual light source at its actual level. 0 = the slot powers no enabled light.
+function glowGainFor(idx) {
+    let gain = 0;
+    for (const entry of lights.values())
+        if (entry.regionSource === idx && entry.enabled)
+            gain = Math.max(gain, 1 + entry.uiIntensity * 1.5);
+    return Math.min(6, gain);
+}
+
 /// Which region slots currently power an ENABLED glow light — those render emissive.
 function syncGlowingSlots() {
     const glowing = new Set();
@@ -1469,6 +1480,10 @@ export function updateLight(id, update) {
     if (update.enabled !== undefined) { entry.enabled = !!update.enabled; syncGlowingSlots(); }
     if (update.x !== undefined) clampHandle(entry.gizmo.position.set(update.x, update.y, update.z));
     applyLightOrbLook(entry); // colour/intensity/enabled all feed the orb's glow
+
+    // A glow region's SURFACE brightness follows its light's intensity — rebake the encoded
+    // gain (aRegionSurf.w band) so dragging the slider visibly brightens/dims the glow.
+    if (entry.regionSource !== null && update.intensity !== undefined && regionIndex) repaintColors();
 
     // Rebuild rather than mutate: color/decay/gradient changes can change the NUMBER of
     // underlying lights, and ≤4 rig lights make this trivially cheap.
@@ -1842,8 +1857,11 @@ function surfFor(idx) {
     if (idx <= 0) return [0, 0, 0, 0];
     const slot = regionPalette[idx - 1];
     const m = slot ? REGION_MATERIALS[slot.material] : undefined;
-    // w: 0 = unpainted, 0.6 = tinted, 1.0 = tinted + EMISSIVE (the region powers a glow light).
-    const w = glowingSlots.has(idx) ? 1.0 : 0.6;
+    // w: 0 = unpainted, 0.6 = tinted, 0.86–1.0 = tinted + EMISSIVE with the glow light's gain
+    // encoded into the band (0.86 → 0, 1.0 → 6): the region surface IS the source, so its
+    // brightness must track the light's intensity, not a fixed constant.
+    const gain = glowGainFor(idx);
+    const w = gain > 0 ? 0.86 + (gain / 6) * 0.14 : 0.6;
     if (!m) return [0, 0, 0, w];
     // Per-slot fine-tune: an explicit metalness/roughness on the slot overrides the preset's
     // values (the presets become starting points). Rides in the palette, so it saves with the mask.
@@ -1920,9 +1938,10 @@ function applyRegionSurfacePatch(material, useTint) {
             .replace('#include <color_fragment>',
                 '#include <color_fragment>\n\tdiffuseColor.rgb = mix( diffuseColor.rgb, vRegionTint, step( 0.3, vRegionSurf.w ) );')
             // Glow-region surfaces emit their own colour, so the source area reads hot under ACES
-            // instead of a passive tint. (w: 0 none, 0.6 tint, 1.0 tint + emissive.)
+            // instead of a passive tint. (w: 0 none, 0.6 tint, 0.86–1.0 tint + emissive whose
+            // gain is encoded in the band — the surface glows at its light's actual level.)
             .replace('#include <emissivemap_fragment>',
-                '#include <emissivemap_fragment>\n\ttotalEmissiveRadiance += vRegionTint * ( step( 0.85, vRegionSurf.w ) * 1.4 );');
+                '#include <emissivemap_fragment>\n\ttotalEmissiveRadiance += vRegionTint * ( step( 0.85, vRegionSurf.w ) * ( vRegionSurf.w - 0.86 ) / 0.14 * 6.0 );');
     };
     const prevKey = material.customProgramCacheKey;
     material.customProgramCacheKey = () =>
