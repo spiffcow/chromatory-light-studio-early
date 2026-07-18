@@ -1211,10 +1211,10 @@ const CLUSTER_OFFSETS = [
     new THREE.Vector3(-1, 1, -1), new THREE.Vector3(-1, -1, 1)
 ].map(v => v.normalize());
 
-function makePointEmitter(objects, color, candela, decay, size, castShadows = true, mapSize = 512, rankBase = 0) {
+function makePointEmitter(objects, color, candela, decay, size, castShadows = true, mapSize = 512, rankBase = 0, shadowNear = undefined) {
     if (size <= 0) {
         const light = new THREE.PointLight(color, candela, 0, decay);
-        if (castShadows) { configureShadowCaster(light, mapSize); light.userData.shadowRank = rankBase; }
+        if (castShadows) { configureShadowCaster(light, mapSize, shadowNear); light.userData.shadowRank = rankBase; }
         objects.push(light);
         return;
     }
@@ -1230,7 +1230,7 @@ function makePointEmitter(objects, color, candela, decay, size, castShadows = tr
         const light = new THREE.PointLight(color, candela / CLUSTER_OFFSETS.length, 0, decay);
         light.userData.clusterOffset = offset.clone().multiplyScalar(size);
         if (castShadows) {
-            configureShadowCaster(light, Math.min(mapSize, 256), Math.max(2, size * 1.2));
+            configureShadowCaster(light, Math.min(mapSize, 256), Math.max(shadowNear ?? 0, 2, size * 1.2));
             light.shadow.radius = 2 + size * 0.15;
             light.userData.shadowRank = i === 0 ? rankBase : rankBase + 3;
         }
@@ -1248,24 +1248,45 @@ function buildLightObjects(entry) {
         configureShadowCaster(light);
         objects.push(light);
     }
-    else if (entry.farColor) {
-        const dNear = Math.min(4, entry.decay + GRADIENT_NEAR_EXTRA);
-        const dFar = Math.max(0.3, entry.decay - GRADIENT_FAR_LESS);
-        // Equal contribution A at the crossover distance x; the pair totals the slider value at
-        // the reference distance: A = ui / (t^dNear + t^dFar) with t = x/REF, candela = A·x^d.
-        const t = clampGradientStart(entry.gradientStart);
-        const x = t * POINT_REFERENCE_DISTANCE;
-        const A = entry.uiIntensity / (Math.pow(t, dNear) + Math.pow(t, dFar));
-        // BOTH halves cast. The far tint used to skip its cube map ("shares the near light's
-        // position, a second map buys nothing") — but a non-casting light is UNOCCLUDED, so the
-        // far colour poured straight through walls (measured: a gradient light kept 16% of a
-        // plain light's occlusion). Its map rides at 256² and yields first under the caster budget.
-        makePointEmitter(objects, new THREE.Color(entry.color), A * Math.pow(x, dNear), dNear, entry.size, true);
-        makePointEmitter(objects, new THREE.Color(entry.farColor), A * Math.pow(x, dFar), dFar, entry.size, true, 256, 1);
-    }
     else {
-        makePointEmitter(objects, new THREE.Color(entry.color),
-            pointCandela(entry.uiIntensity, entry.decay), entry.decay, entry.size);
+        // Region-anchored lights mount a CONSTELLATION: one emitter set per anchor, intensity
+        // split by each anchor's area share, so a long glowing region (a lava river, a rune
+        // strip) lights its surroundings along its whole shape — while the UI still shows one
+        // light. A glowing region must also never BLOCK its own light: the shadow near plane
+        // starts past the surface push-off, so the emitting surface itself is no occluder
+        // (the same trick sized emitters use against orb-in-hand self-swallowing).
+        const anchors = (entry.regionSource !== null && entry.regionAnchors?.length > 1)
+            ? entry.regionAnchors
+            : [{ offset: null, share: 1 }];
+        const shadowNear = entry.regionSource !== null ? modelRadius * 0.12 * 1.35 : undefined;
+
+        for (const [a, anchor] of anchors.entries()) {
+            const before = objects.length;
+            if (entry.farColor) {
+                const dNear = Math.min(4, entry.decay + GRADIENT_NEAR_EXTRA);
+                const dFar = Math.max(0.3, entry.decay - GRADIENT_FAR_LESS);
+                // Equal contribution A at the crossover distance x; the pair totals the slider
+                // value at the reference distance: A = ui / (t^dNear + t^dFar), candela = A·x^d.
+                const t = clampGradientStart(entry.gradientStart);
+                const x = t * POINT_REFERENCE_DISTANCE;
+                const A = entry.uiIntensity * anchor.share / (Math.pow(t, dNear) + Math.pow(t, dFar));
+                // BOTH halves cast. The far tint used to skip its cube map ("shares the near
+                // light's position, a second map buys nothing") — but a non-casting light is
+                // UNOCCLUDED, so the far colour poured straight through walls (measured: a
+                // gradient light kept 16% of a plain light's occlusion). Its map rides at 256²
+                // and yields first under the caster budget.
+                makePointEmitter(objects, new THREE.Color(entry.color), A * Math.pow(x, dNear), dNear, entry.size, true, 512, a > 0 ? 2 : 0, shadowNear);
+                makePointEmitter(objects, new THREE.Color(entry.farColor), A * Math.pow(x, dFar), dFar, entry.size, true, 256, a > 0 ? 3 : 1, shadowNear);
+            }
+            else {
+                makePointEmitter(objects, new THREE.Color(entry.color),
+                    pointCandela(entry.uiIntensity, entry.decay) * anchor.share, entry.decay, entry.size,
+                    true, 512, a > 0 ? 2 : 0, shadowNear);
+            }
+            if (anchor.offset)
+                for (let j = before; j < objects.length; j++)
+                    objects[j].userData.regionOffset = anchor.offset;
+        }
     }
 
     // Ground bounce (NMM's reflected under-light): light returned by the floor into the
@@ -1302,8 +1323,11 @@ function syncLightPositions(entry) {
             // uniform up-light whose position (hence direction) is fixed.
             if (light.isPointLight) light.position.set(p.x, -modelRadius * 0.3, p.z);
         }
-        else if (light.userData.clusterOffset) light.position.copy(p).add(light.userData.clusterOffset);
-        else light.position.copy(p);
+        else {
+            light.position.copy(p);
+            if (light.userData.regionOffset) light.position.add(light.userData.regionOffset);
+            if (light.userData.clusterOffset) light.position.add(light.userData.clusterOffset);
+        }
     }
     requestShadowUpdate();
 }
@@ -1373,36 +1397,134 @@ export function addLight(type, options) {
 // the region's surface (area-weighted centroid pushed out along the average normal) in the region's
 // colour, and the region itself renders emissive so it reads as the emitter.
 
-/// Recomputes a glow light's position + colour from its region's current painting.
+/// Recomputes a glow light's position + colour from its region's current painting. A region with
+/// spatial EXTENT (a lava river along the base, a winding rune strip) also earns several ANCHOR
+/// points via a small area-weighted k-means over its triangles: the light then mounts as a
+/// constellation along the shape (see buildLightObjects), so the surroundings are lit along the
+/// whole glowing area instead of from one centroid — while the UI still shows ONE light with one
+/// handle, one intensity, one colour.
 function anchorRegionLight(entry) {
     const k = entry.regionSource;
     if (k === null || !regionIndex || !mesh) return false;
     const pos = mesh.geometry.attributes.position;
 
-    let cx = 0, cy = 0, cz = 0, nx = 0, ny = 0, nz = 0, count = 0;
-    for (let t = 0; t < regionIndex.length / 3; t++) {
+    // Area-weighted triangle samples (strided so multi-million-face regions stay cheap).
+    const faceCount = regionIndex.length / 3;
+    const stride = Math.max(1, Math.floor(faceCount / 60000));
+    const sx = [], sy = [], sz = [], sw = [];
+    let cx = 0, cy = 0, cz = 0, nx = 0, ny = 0, nz = 0, totalW = 0;
+    let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let t = 0; t < faceCount; t += stride) {
         if (regionIndex[t * 3] !== k) continue; // soup: face label = its first vertex's label
         const i = t * 3;
-        cx += (pos.getX(i) + pos.getX(i + 1) + pos.getX(i + 2)) / 3;
-        cy += (pos.getY(i) + pos.getY(i + 1) + pos.getY(i + 2)) / 3;
-        cz += (pos.getZ(i) + pos.getZ(i + 1) + pos.getZ(i + 2)) / 3;
+        const x = (pos.getX(i) + pos.getX(i + 1) + pos.getX(i + 2)) / 3;
+        const y = (pos.getY(i) + pos.getY(i + 1) + pos.getY(i + 2)) / 3;
+        const z = (pos.getZ(i) + pos.getZ(i + 1) + pos.getZ(i + 2)) / 3;
         const ux = pos.getX(i + 1) - pos.getX(i), uy = pos.getY(i + 1) - pos.getY(i), uz = pos.getZ(i + 1) - pos.getZ(i);
         const vx = pos.getX(i + 2) - pos.getX(i), vy = pos.getY(i + 2) - pos.getY(i), vz = pos.getZ(i + 2) - pos.getZ(i);
-        nx += uy * vz - uz * vy; ny += uz * vx - ux * vz; nz += ux * vy - uy * vx;
-        count++;
+        const crx = uy * vz - uz * vy, cry = uz * vx - ux * vz, crz = ux * vy - uy * vx;
+        const w = Math.max(1e-9, Math.hypot(crx, cry, crz)); // 2× triangle area
+        sx.push(x); sy.push(y); sz.push(z); sw.push(w);
+        cx += x * w; cy += y * w; cz += z * w;
+        nx += crx; ny += cry; nz += crz;
+        totalW += w;
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
     }
-    if (count === 0) return false; // region erased — the light stays where it was
+    if (totalW === 0) return false; // region erased — the light stays where it was
 
-    cx /= count; cy /= count; cz /= count;
+    cx /= totalW; cy /= totalW; cz /= totalW;
     const nLen = Math.hypot(nx, ny, nz) || 1;
     // Push off the surface so the light isn't born inside the mesh (self-shadowed to nothing).
     const off = modelRadius * 0.12;
     entry.gizmo.position.set(cx + (nx / nLen) * off, cy + (ny / nLen) * off, cz + (nz / nLen) * off);
     clampHandle(entry.gizmo.position);
 
+    // How many anchors the extent earns: a compact patch keeps one, an elongated region two,
+    // a sprawling one three. Offsets are stored RELATIVE to the handle, so dragging the handle
+    // moves the whole constellation together.
+    const extent = Math.hypot(maxX - minX, maxY - minY, maxZ - minZ);
+    const anchorCount = extent < modelRadius * 0.55 ? 1 : extent < modelRadius * 1.1 ? 2 : 3;
+    entry.regionAnchors = anchorCount <= 1 ? null
+        : clusterRegionAnchors(sx, sy, sz, sw, anchorCount, off, entry.gizmo.position);
+
     const slot = regionPalette[k - 1];
     if (slot) entry.color = slot.color;
     return true;
+}
+
+/// Area-weighted k-means (farthest-point seeded, a few Lloyd rounds) over a region's triangle
+/// samples. Returns [{offset: Vector3 relative to the handle, share}] with shares summing to 1;
+/// clusters under 3% of the area are dropped (a stray brush dot shouldn't earn its own light).
+function clusterRegionAnchors(sx, sy, sz, sw, K, surfaceOffset, origin) {
+    const n = sx.length;
+    if (n < K * 4) return null;
+
+    // Seeds: farthest point from the mean, then greedily the point farthest from all seeds.
+    const seedIdx = [];
+    const distToSeeds = new Float32Array(n).fill(Infinity);
+    let mx = 0, my = 0, mz = 0, mw = 0;
+    for (let i = 0; i < n; i++) { mx += sx[i] * sw[i]; my += sy[i] * sw[i]; mz += sz[i] * sw[i]; mw += sw[i]; }
+    mx /= mw; my /= mw; mz /= mw;
+    let best = 0, bestD = -1;
+    for (let i = 0; i < n; i++) {
+        const d = (sx[i] - mx) ** 2 + (sy[i] - my) ** 2 + (sz[i] - mz) ** 2;
+        if (d > bestD) { bestD = d; best = i; }
+    }
+    seedIdx.push(best);
+    while (seedIdx.length < K) {
+        const s = seedIdx[seedIdx.length - 1];
+        best = 0; bestD = -1;
+        for (let i = 0; i < n; i++) {
+            const d = (sx[i] - sx[s]) ** 2 + (sy[i] - sy[s]) ** 2 + (sz[i] - sz[s]) ** 2;
+            if (d < distToSeeds[i]) distToSeeds[i] = d;
+            if (distToSeeds[i] > bestD) { bestD = distToSeeds[i]; best = i; }
+        }
+        seedIdx.push(best);
+    }
+
+    const centers = seedIdx.map(i => [sx[i], sy[i], sz[i]]);
+    const assign = new Int32Array(n);
+    for (let iter = 0; iter < 5; iter++) {
+        for (let i = 0; i < n; i++) {
+            let bi = 0, bd = Infinity;
+            for (let c = 0; c < K; c++) {
+                const d = (sx[i] - centers[c][0]) ** 2 + (sy[i] - centers[c][1]) ** 2 + (sz[i] - centers[c][2]) ** 2;
+                if (d < bd) { bd = d; bi = c; }
+            }
+            assign[i] = bi;
+        }
+        const acc = centers.map(() => [0, 0, 0, 0]);
+        for (let i = 0; i < n; i++) {
+            const a = acc[assign[i]];
+            a[0] += sx[i] * sw[i]; a[1] += sy[i] * sw[i]; a[2] += sz[i] * sw[i]; a[3] += sw[i];
+        }
+        for (let c = 0; c < K; c++)
+            if (acc[c][3] > 0) centers[c] = [acc[c][0] / acc[c][3], acc[c][1] / acc[c][3], acc[c][2] / acc[c][3]];
+    }
+
+    // Shares + per-cluster surface push-off along the direction from the region's interior
+    // (approximate: from the cluster centroid away from the overall mean — cheap and stable).
+    const weights = new Array(K).fill(0);
+    for (let i = 0; i < n; i++) weights[assign[i]] += sw[i];
+    const total = weights.reduce((a, b) => a + b, 0) || 1;
+    const anchors = [];
+    for (let c = 0; c < K; c++) {
+        const share = weights[c] / total;
+        if (share < 0.03) continue;
+        const dx = centers[c][0] - mx, dy = centers[c][1] - my, dz = centers[c][2] - mz;
+        const dLen = Math.hypot(dx, dy, dz);
+        // Push out along the local outward hint (or straight up for the central cluster).
+        const px = centers[c][0] + (dLen > 1e-6 ? dx / dLen : 0) * surfaceOffset * 0.4;
+        const py = centers[c][1] + (dLen > 1e-6 ? dy / dLen : 1) * surfaceOffset * 0.4 + surfaceOffset * 0.6;
+        const pz = centers[c][2] + (dLen > 1e-6 ? dz / dLen : 0) * surfaceOffset * 0.4;
+        anchors.push({ offset: new THREE.Vector3(px - origin.x, py - origin.y, pz - origin.z), share });
+    }
+    if (anchors.length < 2) return null;
+    const shareSum = anchors.reduce((a, b) => a + b.share, 0);
+    for (const a of anchors) a.share /= shareSum;
+    return anchors;
 }
 
 /// Re-anchors every glow light and refreshes the emissive flags — called whenever painting,
