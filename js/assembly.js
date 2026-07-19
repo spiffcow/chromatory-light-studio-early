@@ -13,9 +13,10 @@ import * as THREE from 'three';
 import { STLLoader } from '../lib/three/STLLoader.js';
 import { OrbitControls } from '../lib/three/OrbitControls.js';
 import { TransformControls } from '../lib/three/TransformControls.js';
+import { createViewCube } from './view-cube.js';
 
 let renderer, scene, camera, controls, canvasEl;
-let moveGizmo, rotateGizmo;
+let moveGizmo, rotateGizmo, viewCube;
 let selectedId = null;
 
 // Both gizmos attach to this pivot, positioned at the SELECTED PART'S bounding-box center —
@@ -165,9 +166,15 @@ export function init(canvas) {
     const gizmoReset = () => { moveGizmo.enabled = true; rotateGizmo.enabled = true; };
     canvas.addEventListener('pointercancel', gizmoReset, true);
 
+    viewCube = createViewCube(renderer, camera, controls, canvas);
+
+    // Explicit clear: the view cube composites over the top-right corner after the main pass.
+    renderer.autoClear = false;
     renderer.setAnimationLoop(() => {
         controls.update();
+        renderer.clear();
         renderer.render(scene, camera);
+        viewCube.render();
     });
 }
 
@@ -175,6 +182,8 @@ export function dispose() {
     renderer?.setAnimationLoop(null);
     window.removeEventListener('resize', resize);
     window.removeEventListener('keydown', onKeyDown);
+    viewCube?.dispose();
+    viewCube = null;
     renderer?.dispose();
     parts.clear();
     partStore.clear();
@@ -203,9 +212,16 @@ function notifyChanged() {
 }
 
 function status(text) {
+    if (text) devlog('status', { text }); // the narration IS a good trace
     if (!statusCallback) return;
     if (typeof statusCallback === 'function') statusCallback(text);
     else statusCallback.invokeMethodAsync('OnAssemblyStatus', text);
+}
+
+/// Dev-build action trace (no-op unless dev-log.js registered the hook): rich, parameterized
+/// events — anchor coordinates, fit results — that a generic click logger can't see.
+function devlog(action, data) {
+    window.__chromatoryDevLog?.('assembly:' + action, data);
 }
 
 function onKeyDown(event) {
@@ -215,9 +231,18 @@ function onKeyDown(event) {
 
     if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z') {
         event.preventDefault();
+        // In scissor mode Ctrl+Z means "undo the last cut point" — the cut line lives in the
+        // scissor session, not the parts undo stack, so route to the session's own undo.
+        if (scissors) { scissorUndo().then(() => notifyChanged()); return; }
         if (undo()) notifyChanged();
     }
+    else if (event.key === 'Escape' && scissors) {
+        event.preventDefault();
+        exitScissors();
+        notifyChanged();
+    }
     else if ((event.key === 'Delete' || event.key === 'Backspace') && selectedId !== null) {
+        if (scissors) return; // deleting the part mid-cut is never what Delete meant
         event.preventDefault();
         removePart(selectedId);
         notifyChanged();
@@ -430,8 +455,18 @@ function setPointer(event) {
 
 function onPointerDown(event) {
     if (moveGizmo?.dragging || rotateGizmo?.dragging) return;
+    if (viewCube?.handlePointerDown(event)) return; // the corner widget owns its clicks
     setPointer(event);
     raycaster.setFromCamera(pointer, camera);
+
+    // Scissor mode: clicks place cut anchors on the part being cut — no select, no drag.
+    if (scissors) {
+        const cutting = parts.get(scissors.partId);
+        const hit = cutting ? raycaster.intersectObject(cutting.mesh, false)[0] : null;
+        if (hit) scissorClick(hit.point);
+        return;
+    }
+
     const meshes = [...parts.values()].filter(e => e.mesh.visible).map(e => e.mesh);
     const hit = raycaster.intersectObjects(meshes, false)[0];
     if (!hit) {
@@ -451,6 +486,7 @@ function onPointerDown(event) {
 }
 
 function onPointerMove(event) {
+    if (viewCube?.handlePointerMove(event)) return;
     if (dragging === null) return;
     setPointer(event);
     raycaster.setFromCamera(pointer, camera);
@@ -465,7 +501,8 @@ function onPointerMove(event) {
     }
 }
 
-function onPointerUp() {
+function onPointerUp(event) {
+    if (viewCube?.handlePointerUp(event)) return;
     const moved = dragging !== null && draggedSinceDown;
     dragging = null;
     controls.enabled = true;
@@ -744,20 +781,419 @@ export async function snapSelected(auto = false) {
 
     status('');
     if (contactCount < 60 || meanDist > tolerance) {
+        devlog('snap-rejected', { contacts: contactCount, gap: +meanDist.toFixed(3), tolerance: +tolerance.toFixed(3) });
         return {
             snapped: false,
             reason: `no confident fit (contact ${contactCount}, gap ${meanDist.toFixed(2)} > ${tolerance.toFixed(2)})`
         };
     }
     if (drift > 0.45 * mRadius || rotDrift > THREE.MathUtils.degToRad(40)) {
+        devlog('snap-rejected', { reason: 'wandered', drift: +drift.toFixed(3) });
         return { snapped: false, reason: 'fit wandered too far — place the part closer to where it belongs' };
     }
 
+    devlog('snap', { part: moving.name, target: target.name, gap: +meanDist.toFixed(3), contacts: contactCount });
     captureUndo('snap', false);
     moving.mesh.matrix.copy(proposedLocal);
     moving.mesh.matrix.decompose(moving.mesh.position, moving.mesh.quaternion, moving.mesh.scale);
     if (moving.id === selectedId) syncPivot();
     return { snapped: true, gap: meanDist, contacts: contactCount };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Scissor cut: click points on the selected part; the service routes each leg along the
+// SHARPEST creases between clicks (MeshScissor A*), the canvas draws the accumulated cut line,
+// and once the path fully separates the surface the cut executes server-side. All geometry
+// stays on the service; the canvas only places anchors and draws polylines.
+// ---------------------------------------------------------------------------------------------
+
+let scissors = null; // { sessionId, urlBase, headerName, headerValue, partId, overlay, markers, busy }
+
+async function scissorPost(path, body) {
+    const response = await fetch(`${scissors.urlBase}/${path}`, {
+        method: 'POST',
+        headers: { [scissors.headerName]: scissors.headerValue, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    if (!response.ok) {
+        let reason = `${response.status}`;
+        try { reason = (await response.json()).detail ?? reason; } catch { }
+        throw new Error(reason);
+    }
+    return await response.json();
+}
+
+function scissorMarkerSize(entry) {
+    return entry.mesh.geometry.boundingSphere.radius * 0.012;
+}
+
+const scissorChain = () => scissors.chains[scissors.chains.length - 1];
+const scissorAnchorCount = () => scissors.chains.reduce((sum, c) => sum + c.markers.length, 0);
+
+function scissorAddMarker(entry, localPoint, first) {
+    const marker = new THREE.Mesh(
+        new THREE.SphereGeometry(scissorMarkerSize(entry), 12, 12),
+        new THREE.MeshBasicMaterial({ color: first ? 0xffe640 : 0xff4040, depthTest: false }));
+    marker.position.copy(localPoint);
+    marker.renderOrder = 30;
+    scissors.overlay.add(marker);
+    scissorChain().markers.push(marker);
+}
+
+function scissorAddPolyline(points) {
+    const geometry = new THREE.BufferGeometry().setFromPoints(
+        points.map(p => new THREE.Vector3(p[0], p[1], p[2])));
+    const line = new THREE.Line(geometry,
+        new THREE.LineBasicMaterial({ color: 0xff3030, depthTest: false }));
+    line.renderOrder = 29;
+    scissors.overlay.add(line);
+    scissorChain().lines.push(line);
+}
+
+/// The next click starts a SEPARATE cut line — some separations need several (a handle wants a
+/// loop at each end; a staff held in two hands wants a cut at each hand).
+export function scissorNewLine() {
+    if (!scissors) return;
+    scissors.pendingNewChain = true;
+    status('scissors: next click starts a NEW cut line');
+}
+
+/// Enters scissor mode on the SELECTED part: uploads its local-space STL once, then clicks
+/// place anchors instead of moving parts. Returns a JSON status for the shell.
+export async function enterScissors(urlBase, headerName, headerValue) {
+    const entry = selectedId !== null ? parts.get(selectedId) : null;
+    if (!entry) return JSON.stringify({ ok: false, reason: 'select a part first' });
+    if (scissors) exitScissors();
+    status('preparing scissors (uploading part + building the crease graph)…');
+    try {
+        const response = await fetch(`${urlBase}/begin`, {
+            method: 'POST',
+            headers: { [headerName]: headerValue, 'Content-Type': 'application/octet-stream' },
+            body: exportPartLocalStl(entry)
+        });
+        if (!response.ok) throw new Error(`${response.status}`);
+        const result = await response.json();
+
+        const overlay = new THREE.Group();
+        entry.mesh.add(overlay); // local coords ride the part's transform
+        scissors = {
+            sessionId: result.sessionId, urlBase, headerName, headerValue,
+            partId: entry.id, overlay, chains: [], pendingNewChain: false, busy: false
+        };
+        moveGizmo.detach();
+        rotateGizmo.detach();
+        status('scissors: click points along the crease to cut on');
+        return JSON.stringify({ ok: true });
+    }
+    catch (error) {
+        status('');
+        return JSON.stringify({ ok: false, reason: error.message });
+    }
+}
+
+export function exitScissors() {
+    if (!scissors) return;
+    const entry = parts.get(scissors.partId);
+    entry?.mesh.remove(scissors.overlay);
+    scissors.overlay.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+    fetch(`${scissors.urlBase}/${scissors.sessionId}`, {
+        method: 'DELETE', headers: { [scissors.headerName]: scissors.headerValue }
+    }).catch(() => { });
+    scissors = null;
+    status('');
+}
+
+export function isScissorsActive() { return scissors !== null; }
+
+/// Canvas click while in scissor mode: raycast the part, snap server-side, draw the new leg.
+async function scissorClick(hitPoint) {
+    if (scissors.busy) return;
+    const entry = parts.get(scissors.partId);
+    if (!entry) return;
+    scissors.busy = true;
+    try {
+        const local = entry.mesh.worldToLocal(hitPoint.clone());
+        const result = await scissorPost('anchor',
+            { sessionId: scissors.sessionId, x: local.x, y: local.y, z: local.z,
+              newChain: scissors.pendingNewChain });
+        scissors.pendingNewChain = false;
+        devlog('scissor-anchor', {
+            x: +local.x.toFixed(3), y: +local.y.toFixed(3), z: +local.z.toFixed(3),
+            anchors: result.anchors, chains: result.chains,
+            separates: result.separates, components: result.components
+        });
+        if (result.startsChain || scissors.chains.length === 0)
+            scissors.chains.push({ markers: [], lines: [] });
+        scissorAddMarker(entry, new THREE.Vector3(...result.anchor), scissorChain().markers.length === 0);
+        if (result.polyline) scissorAddPolyline(result.polyline);
+        scissors.separates = result.separates;
+        const lineNote = result.chains > 1 ? ` (${result.chains} lines)` : '';
+        status(`scissors: ${result.anchors} point(s)${lineNote} — ${result.separates
+            ? 'the cut SEPARATES the part ✓ ready to cut'
+            : 'not separating yet (close the loop, keep going, or add a New line)'}`);
+        notifyChanged(); // the shell re-reads scissor state for its buttons
+    }
+    catch (error) { status(`scissors: ${error.message}`); }
+    finally { scissors.busy = false; }
+}
+
+/// Routes from the last anchor back to the first, completing a loop.
+export async function scissorClose() {
+    if (!scissors || scissors.busy) return JSON.stringify({ ok: false, reason: 'not in scissor mode' });
+    scissors.busy = true;
+    try {
+        const result = await scissorPost('close', { sessionId: scissors.sessionId });
+        devlog('scissor-close', { separates: result.separates, components: result.components });
+        if (result.polyline) scissorAddPolyline(result.polyline);
+        scissors.separates = result.separates;
+        scissors.pendingNewChain = true; // a closed loop is complete — clicking again starts a new line
+        status(`scissors: loop closed — ${result.separates
+            ? 'SEPARATES ✓ ready to cut'
+            : 'still not separating (another line may be needed — e.g. a handle wants a loop at BOTH ends)'}`);
+        return JSON.stringify({ ok: true, separates: result.separates });
+    }
+    catch (error) {
+        status(`scissors: ${error.message}`);
+        return JSON.stringify({ ok: false, reason: error.message });
+    }
+    finally { scissors.busy = false; }
+}
+
+export async function scissorUndo() {
+    if (!scissors || scissors.busy) return JSON.stringify({ ok: false });
+    scissors.busy = true;
+    try {
+        const result = await scissorPost('undo', { sessionId: scissors.sessionId });
+        const chain = scissorChain();
+        if (chain) {
+            const marker = chain.markers.pop();
+            if (marker) scissors.overlay.remove(marker);
+            if (chain.lines.length > Math.max(0, chain.markers.length - 1)) {
+                const line = chain.lines.pop();
+                if (line) scissors.overlay.remove(line);
+            }
+            if (chain.markers.length === 0) scissors.chains.pop();
+        }
+        scissors.pendingNewChain = false; // resume the line the undo landed on
+        scissors.separates = result.separates;
+        status(`scissors: ${result.anchors} point(s)${result.chains > 1 ? ` (${result.chains} lines)` : ''}${result.separates ? ' — SEPARATES ✓' : ''}`);
+        return JSON.stringify({ ok: true, separates: result.separates });
+    }
+    catch (error) { return JSON.stringify({ ok: false, reason: error.message }); }
+    finally { scissors.busy = false; }
+}
+
+export function scissorState() {
+    return JSON.stringify({
+        active: scissors !== null,
+        anchors: scissors ? scissorAnchorCount() : 0,
+        chains: scissors?.chains.length ?? 0,
+        separates: scissors?.separates ?? false
+    });
+}
+
+/// Executes the cut: the part is replaced by the separated pieces at the same transform.
+export async function scissorCut(cap) {
+    if (!scissors || scissors.busy) return JSON.stringify({ ok: false, reason: 'not in scissor mode' });
+    scissors.busy = true;
+    status('cutting…');
+    try {
+        const result = await scissorPost('cut', { sessionId: scissors.sessionId, cap: !!cap });
+        const entry = parts.get(scissors.partId);
+        if (!entry) throw new Error('the part disappeared mid-cut');
+        entry.mesh.updateMatrix();
+        const matrix = [...entry.mesh.matrix.toArray()];
+        const baseName = entry.name;
+
+        // The session is consumed server-side; tear down the overlay without the DELETE call.
+        entry.mesh.remove(scissors.overlay);
+        scissors.overlay.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+        scissors = null;
+
+        captureUndo('scissor-cut', false);
+        undoSuppressDepth++;
+        const added = [];
+        try {
+            detachPart(entry.id);
+            for (let i = 0; i < result.parts.length; i++) {
+                const bytes = Uint8Array.from(atob(result.parts[i].stl), ch => ch.charCodeAt(0));
+                const id = addPartFromBytes(bytes, `${baseName} · ${String.fromCharCode(65 + (i % 26))}`);
+                setPartMatrix(id, matrix);
+                added.push(id);
+            }
+        }
+        finally { undoSuppressDepth--; }
+        if (added.length > 0) selectPart(added[0]);
+        devlog('scissor-cut', { pieces: added.length, from: baseName });
+        status(`cut into ${added.length} pieces ✓ (Ctrl+Z undoes the whole cut)`);
+        return JSON.stringify({ ok: true, count: added.length });
+    }
+    catch (error) {
+        status(`scissors: ${error.message}`);
+        return JSON.stringify({ ok: false, reason: error.message });
+    }
+    finally { if (scissors) scissors.busy = false; }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Seam detection + split (server-side geometry; the canvas only previews and re-adds parts).
+// The selected part's LOCAL-space STL goes to the service, which finds the crease loops where
+// separate pieces meet. Preview-first: detect colours the part per candidate piece; split
+// replaces the part with the returned pieces at the exact same transform.
+// ---------------------------------------------------------------------------------------------
+
+const SEAM_COLORS = ['#ff4040', '#40d440', '#4080ff', '#ffe640', '#ff40ff', '#40e8e8',
+                     '#ff8c1a', '#a060ff', '#f0f0f0', '#8a5a30'];
+
+/// One part's geometry as binary STL. Without a matrix: LOCAL space (so split pieces can be
+/// re-added under the part's original matrix and land exactly in place). With one: baked —
+/// the file matches what's on screen, which is what a per-part download wants.
+function exportPartStl(entry, matrix = null) {
+    const pos = entry.mesh.geometry.attributes.position;
+    const triCount = pos.count / 3;
+    const buffer = new ArrayBuffer(84 + triCount * 50);
+    const out = new Uint8Array(buffer);
+    out.set(new TextEncoder().encode('Chromatory part'), 0);
+    new DataView(buffer).setUint32(80, triCount, true);
+    const scratch = new Float32Array(12);
+    const scratchBytes = new Uint8Array(scratch.buffer, 0, 48);
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const ab = new THREE.Vector3(), ac = new THREE.Vector3(), n = new THREE.Vector3();
+    let offset = 84;
+    for (let t = 0; t < triCount; t++) {
+        a.fromBufferAttribute(pos, t * 3);
+        b.fromBufferAttribute(pos, t * 3 + 1);
+        c.fromBufferAttribute(pos, t * 3 + 2);
+        if (matrix) { a.applyMatrix4(matrix); b.applyMatrix4(matrix); c.applyMatrix4(matrix); }
+        n.copy(ab.subVectors(b, a)).cross(ac.subVectors(c, a)).normalize();
+        scratch[0] = n.x; scratch[1] = n.y; scratch[2] = n.z;
+        scratch[3] = a.x; scratch[4] = a.y; scratch[5] = a.z;
+        scratch[6] = b.x; scratch[7] = b.y; scratch[8] = b.z;
+        scratch[9] = c.x; scratch[10] = c.y; scratch[11] = c.z;
+        out.set(scratchBytes, offset);
+        offset += 50;
+    }
+    return out;
+}
+
+const exportPartLocalStl = entry => exportPartStl(entry);
+
+/// Downloads ONE part as a binary STL with its current transform baked — scale, rotation and
+/// position as seen on screen — so cut pieces go straight to the slicer.
+export function downloadPart(id) {
+    const entry = parts.get(id);
+    if (!entry) return;
+    entry.mesh.updateMatrixWorld();
+    const bytes = exportPartStl(entry, entry.mesh.matrixWorld);
+    const blob = new Blob([bytes], { type: 'model/stl' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = entry.name.replace(/[^\w\-. ·]+/g, '_') + '.stl';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+}
+
+async function postPartStl(entry, url, headerName, headerValue) {
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { [headerName]: headerValue, 'Content-Type': 'application/octet-stream' },
+        body: exportPartLocalStl(entry)
+    });
+    if (!response.ok) {
+        let reason = `${response.status}`;
+        try { reason = (await response.json()).detail ?? reason; } catch { }
+        throw new Error(reason);
+    }
+    return await response.json();
+}
+
+/// Detects seams in the selected part and colours it per candidate piece (preview only —
+/// geometry and parts are untouched). Returns the detection summary for the shell's UI.
+export async function detectSeams(url, headerName, headerValue) {
+    const entry = selectedId !== null ? parts.get(selectedId) : null;
+    if (!entry) return JSON.stringify({ ok: false, reason: 'select a part first' });
+    status('detecting seams…');
+    try {
+        const result = await postPartStl(entry, url, headerName, headerValue);
+        const labels = Uint8Array.from(atob(result.labels), ch => ch.charCodeAt(0));
+
+        const pos = entry.mesh.geometry.attributes.position;
+        const colors = new Float32Array(pos.count * 3);
+        const c = new THREE.Color();
+        for (let t = 0; t < labels.length; t++) {
+            c.set(SEAM_COLORS[(labels[t] - 1 + SEAM_COLORS.length) % SEAM_COLORS.length]);
+            for (let k = 0; k < 3; k++) {
+                colors[(t * 3 + k) * 3] = c.r;
+                colors[(t * 3 + k) * 3 + 1] = c.g;
+                colors[(t * 3 + k) * 3 + 2] = c.b;
+            }
+        }
+        entry.mesh.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        entry.seamPreview = true;
+        entry.mesh.material.vertexColors = true;
+        entry.mesh.material.color.set('#ffffff');
+        entry.mesh.material.needsUpdate = true;
+
+        return JSON.stringify({
+            ok: true, seamEdges: result.seamEdges,
+            parts: result.parts.map((p, i) => ({
+                ...p, color: SEAM_COLORS[(p.label - 1) % SEAM_COLORS.length]
+            }))
+        });
+    }
+    catch (error) {
+        return JSON.stringify({ ok: false, reason: error.message });
+    }
+    finally { status(''); }
+}
+
+/// Drops the seam preview colouring from every part (called on cancel and after a split).
+export function clearSeamPreview() {
+    for (const entry of parts.values()) {
+        if (!entry.seamPreview) continue;
+        entry.seamPreview = false;
+        entry.mesh.geometry.deleteAttribute('color');
+        entry.mesh.material.vertexColors = false;
+        entry.mesh.material.color.set(entry.color);
+        entry.mesh.material.needsUpdate = true;
+    }
+}
+
+/// Splits the selected part along its detected seams: the part is replaced by the returned
+/// pieces, each under the ORIGINAL part's transform so nothing moves on screen.
+export async function splitSelected(url, headerName, headerValue) {
+    const entry = selectedId !== null ? parts.get(selectedId) : null;
+    if (!entry) return JSON.stringify({ ok: false, reason: 'select a part first' });
+    status('splitting along seams…');
+    try {
+        const result = await postPartStl(entry, url, headerName, headerValue);
+        entry.mesh.updateMatrix();
+        const matrix = [...entry.mesh.matrix.toArray()];
+        const baseName = entry.name;
+
+        clearSeamPreview();
+        // One undo entry for the whole operation: undoing a split brings the original back
+        // and removes the pieces in a single Ctrl+Z.
+        captureUndo('split', false);
+        undoSuppressDepth++;
+        const added = [];
+        try {
+            detachPart(entry.id);
+            for (let i = 0; i < result.parts.length; i++) {
+                const bytes = Uint8Array.from(atob(result.parts[i].stl), ch => ch.charCodeAt(0));
+                const id = addPartFromBytes(bytes, `${baseName} · ${String.fromCharCode(65 + (i % 26))}`);
+                setPartMatrix(id, matrix);
+                added.push(id);
+            }
+        }
+        finally { undoSuppressDepth--; }
+        if (added.length > 0) selectPart(added[0]);
+        return JSON.stringify({ ok: true, count: added.length });
+    }
+    catch (error) {
+        return JSON.stringify({ ok: false, reason: error.message });
+    }
+    finally { status(''); }
 }
 
 // ---------------------------------------------------------------------------------------------

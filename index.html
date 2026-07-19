@@ -14,7 +14,17 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Chromatory — Light Studio</title>
+    <title>Chromatory Light Studio · free NMM &amp; OSL preview for miniature painters</title>
+    <meta name="description" content="Light your own STL in the browser: preview NMM and OSL with real cast shadows, paint regions, save lighting rigs. Free, no account, and your model is never uploaded." />
+    <link rel="canonical" href="https://spiffcow.github.io/chromatory-light-studio/" />
+    <meta property="og:title" content="Chromatory Light Studio" />
+    <meta property="og:description" content="Preview NMM and OSL on your own STL with real cast shadows, free in your browser. Nothing is uploaded." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://spiffcow.github.io/chromatory-light-studio/" />
+    <meta property="og:image" content="https://chromatory.com/assets/studio-price-of-magic.png" />
+    <meta property="og:image:alt" content="The Price of Magic (sculpted by Nerikson) rendered with NMM and OSL in Chromatory's Light Studio" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="https://chromatory.com/assets/studio-price-of-magic.png" />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <script type="importmap">{ "imports": { "three": "./lib/three/three.module.js" } }</script>
     <!-- The SAME stylesheet the Chromatory app uses (copied from the source tree by the deploy
@@ -775,7 +785,7 @@
     if (FEATURES.regions) { loadPalette(); renderPalette(); renderLightUp(); }
 
     // News badge: highlighted until the news page for this version has been opened once.
-    if (localStorage.getItem('pb-news-seen') !== '2026-07-17') $('newsLink').classList.add('unread');
+    if (localStorage.getItem('pb-news-seen') !== '2026-07-19') $('newsLink').classList.add('unread');
 
     // First visit: load the sample bust (CC0) so the page demonstrates itself — replaced the
     // moment the visitor drops their own STL. Fetched after init so the UI paints first.

@@ -12,7 +12,17 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Chromatory — Assembly</title>
+    <title>Chromatory Assembly Workbench · snap &amp; merge multi-part STL kits in your browser</title>
+    <meta name="description" content="Assemble multi-part miniature kits in your browser: drag parts into place, snap the mating surfaces together, and export one watertight STL ready to print. Free, nothing uploaded." />
+    <link rel="canonical" href="https://spiffcow.github.io/chromatory-light-studio/assembly/" />
+    <meta property="og:title" content="Chromatory Assembly Workbench" />
+    <meta property="og:description" content="Snap multi-part STL kits together in your browser and export one printable model. Free, nothing uploaded." />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://spiffcow.github.io/chromatory-light-studio/assembly/" />
+    <meta property="og:image" content="https://chromatory.com/assets/assembly-krymathor-complete.png" />
+    <meta property="og:image:alt" content="Krymathor (sculpted by Flesh of Gods) assembled in Chromatory's Assembly Workbench" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content="https://chromatory.com/assets/assembly-krymathor-complete.png" />
     <link rel="icon" href="../favicon.svg" type="image/svg+xml" />
     <script type="importmap">{ "imports": { "three": "../lib/three/three.module.js" } }</script>
     <style>
@@ -82,7 +92,8 @@
         <label><input type="checkbox" id="autoSnap" /> auto-snap on release</label>
         <button class="ghost" id="frame" title="Frame all parts">⛶</button>
         <span class="muted small" style="margin-left:auto">click a part: arrows move, rings rotate
-            (about the part's centre) · <b>Del</b> removes · <b>Ctrl+Z</b> undoes</span>
+            (about the part's centre) · the corner cube snaps views · <b>Del</b> removes ·
+            <b>Ctrl+Z</b> undoes</span>
     </div>
     <div class="row"><span class="muted small" id="snapstatus"></span></div>
     </div><!-- /stage -->
@@ -179,6 +190,8 @@
                             title="uniform scale — for kitbashing parts from different sets"></label>
                         <button class="ghost" data-id="${part.id}" data-k="eye"
                             title="show/hide (hidden parts are excluded from the export)">${part.visible ? '👁' : '🚫'}</button>
+                        <button class="ghost" data-id="${part.id}" data-k="download"
+                            title="save this part as its own STL, positioned exactly as placed">⬇</button>
                         <button class="ghost" data-id="${part.id}" data-k="remove" title="remove part">✕</button>
                     </span>
                 </div>`;
@@ -192,6 +205,7 @@
         host.querySelectorAll('[data-k]').forEach(el => {
             const id = parseInt(el.dataset.id, 10);
             if (el.dataset.k === 'remove') el.addEventListener('click', () => { studio.removePart(id); renderParts(); });
+            else if (el.dataset.k === 'download') el.addEventListener('click', () => studio.downloadPart(id));
             else if (el.dataset.k === 'eye') el.addEventListener('click', () => {
                 const part = JSON.parse(studio.listPartsJson()).find(p => p.id === id);
                 studio.setPartVisible(id, !part.visible);
@@ -204,7 +218,7 @@
     renderParts();
 
     // News badge: highlighted until the news page for this version has been opened once.
-    if (localStorage.getItem('pb-news-seen') !== '2026-07-17') $('newsLink').classList.add('unread');
+    if (localStorage.getItem('pb-news-seen') !== '2026-07-19') $('newsLink').classList.add('unread');
 
     // ---- Save merged STL (Save As dialog where supported, download otherwise)
     async function saveBlob(blob, suggestedName, description, mime, ext) {

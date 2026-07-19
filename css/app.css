@@ -220,3 +220,9 @@ details.section[open] > summary { margin-bottom: 6px; }
     /* First control card sits flush with the top of the render. */
     .studio-panel > .section:first-of-type { margin-top: 0; }
 }
+
+/* Rendered markdown documents (the design vision card and friends) */
+.md-doc table { border-collapse: collapse; margin: 8px 0; }
+.md-doc th, .md-doc td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
+.md-doc th { background: rgba(255, 255, 255, 0.05); }
+.md-doc code { background: rgba(255, 255, 255, 0.08); padding: 1px 5px; border-radius: 5px; }

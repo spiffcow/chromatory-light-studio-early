@@ -2494,6 +2494,54 @@ export function __debugFill(faceIndex, region, angleDeg) {
     return fillFromFace(faceIndex | 0);
 }
 
+/// Vision-driven painting (the paint_region tool): raycast through a NORMALIZED image point
+/// (0–1, origin top-left — the coordinate system a vision model reads off a render) as seen
+/// from the CURRENT camera, optionally rotated to captureAngles' view i-of-n so points given on
+/// ANY rendered angle aim correctly, then flood-fill the hit area into a region (the same
+/// click-to-fill the interactive studio uses). Returns JSON {hit, faceIndex?, filledFaces?}.
+export function fillAtImagePoint(nx, ny, region, angleDeg, viewIndex = 0, viewCount = 1, maxFaces = 0) {
+    if (!mesh || !camera) return JSON.stringify({ hit: false, error: 'no model loaded' });
+    ensureRegionBuffers();
+
+    // Reproduce captureAngles' exact azimuth for the view the coordinates were read from.
+    const target = controls.target.clone();
+    const savedPos = camera.position.clone();
+    if (viewIndex > 0 && viewCount > 1) {
+        const offset = savedPos.clone().sub(target);
+        const az = Math.atan2(offset.x, offset.z) + (viewIndex / viewCount) * Math.PI * 2;
+        const horiz = Math.hypot(offset.x, offset.z);
+        camera.position.set(target.x + horiz * Math.sin(az), target.y + offset.y, target.z + horiz * Math.cos(az));
+        camera.lookAt(target);
+        camera.updateMatrixWorld();
+    }
+
+    raycaster.setFromCamera(new THREE.Vector2(nx * 2 - 1, -(ny * 2 - 1)), camera);
+    const hit = raycaster.intersectObject(mesh)[0];
+
+    camera.position.copy(savedPos);
+    camera.lookAt(target);
+    controls.update();
+
+    if (!hit || hit.faceIndex === undefined || hit.faceIndex === null)
+        return JSON.stringify({ hit: false });
+    strokeRegion = region | 0;
+    brush.fillAngle = angleDeg;
+    // With a face budget, record prior values so an oversized fill can roll back — a fill far
+    // bigger than the aimed feature means the ray hit the wrong surface (parallax) or leaked
+    // across a soft boundary, and applying it would wreck neighbouring areas.
+    strokeDiff = maxFaces > 0 ? new Map() : null;
+    const filledFaces = fillFromFace(hit.faceIndex);
+    let rejected = false;
+    if (maxFaces > 0 && filledFaces > maxFaces) {
+        for (const [i, prev] of strokeDiff) regionIndex[i] = prev;
+        repaintColors();
+        refreshRegionLights();
+        rejected = true;
+    }
+    strokeDiff = null;
+    return JSON.stringify({ hit: true, faceIndex: hit.faceIndex, filledFaces, rejected });
+}
+
 /// Enter/leave paint mode. Paint mode swaps to a LIT vertex-colour material — so the model keeps its
 /// shape and surface detail while the coloured regions tint it — rather than a flat unlit fill.
 export function setPaintMode(on) {
