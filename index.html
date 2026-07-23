@@ -100,14 +100,18 @@
 
 <div class="studio-panel">
 
+<div class="row" id="advancedRow" style="display:none;justify-content:flex-end;margin-bottom:4px">
+    <label class="muted small" title="Show the deeper tuning controls: material fine-tune, shadow colour, and per-light falloff, size and bounce. Off keeps the panel simple.">
+        <input type="checkbox" id="advanced" /> ⚙ Advanced controls
+    </label>
+</div>
+
 <details class="card section" open>
     <summary>🎨 Look</summary>
-    <div class="muted small">Responds to your lights:</div>
-    <div class="row" id="looks-live"></div>
-    <div class="muted small">Fixed idealized reference (ignores lights — the shapes to copy):</div>
-    <div class="row" id="looks-fixed"></div>
-    <div class="muted small" id="renderModeLabel" style="display:none">Render style (composes with the material above):</div>
+    <div class="muted small" id="renderModeLabel" style="display:none">Render mode (how the model is displayed):</div>
     <div class="row" id="render-modes" style="display:none"></div>
+    <div class="muted small">Material (what the surface is):</div>
+    <div class="row" id="looks-live"></div>
     <div class="row">
         <label>Color <input type="color" id="color" value="#c8ccd2" /></label>
         <label id="bandsRow" style="display:none">Bands <input type="range" id="bands" min="2" max="8" step="1" value="4" /></label>
@@ -246,7 +250,9 @@
     // multiStl: the Scene section — add extra STLs as movable props to light a composed scene.
     // gemFinish: the Gem region material (inverted transmission look) — early-access first.
     // glowRegion: a painted area becomes a light source (lava, runes) — early-access first.
-    const FEATURES = { regions: true, assembly: true, multiStl: true, gemFinish: true, glowRegion: true, renderModes: true };
+    // renderModes: the render-style picker (Cel / Value study / Vibrant) — early-access first.
+    // advancedControls: the ⚙ toggle that keeps the panel simple by default — early-access first.
+    const FEATURES = { regions: true, assembly: true, multiStl: true, gemFinish: true, glowRegion: true, renderModes: true, advancedControls: true };
 
     const $ = id => document.getElementById(id);
     const status = $('loadstatus');
@@ -287,20 +293,25 @@
     // ---- Looks: material (studio.LOOKS) x render mode (studio.RENDER_MODES), two independent axes.
     let currentLook = 'silvernmm';
     let currentRenderMode = 'realistic';
+    // Advanced-controls preference (parity with the app's ⚙ toggle). On the stable build the feature
+    // is off and everything shows, exactly as the standalone always did; on the early-access build the
+    // toggle appears, the panel starts simple, and the choice is remembered per browser.
+    let advanced = FEATURES.advancedControls ? localStorage.getItem('chromatory-studio-advanced') === '1' : true;
     const appearance = { shader: 'pbr', renderMode: 'realistic', matcap: 'chrome', toonBands: 4, color: '#c8ccd2',
         metalness: 1.0, roughness: 0.3, clearcoat: 0, envIntensity: 0.75 };
 
     function renderLookButtons() {
-        for (const [host, fixed] of [[$('looks-live'), false], [$('looks-fixed'), true]]) {
-            host.innerHTML = '';
-            for (const [key, look] of Object.entries(studio.LOOKS)) {
-                if (look.fixedReference !== fixed) continue;
-                const button = document.createElement('button');
-                button.textContent = look.label;
-                button.className = key === currentLook ? 'active' : '';
-                button.addEventListener('click', () => applyLook(key));
-                host.appendChild(button);
-            }
+        const host = $('looks-live');
+        host.innerHTML = '';
+        // Only the light-responsive materials; the fixed idealized matcaps now live in RENDER_MODES
+        // and, like the app, stay hidden (UiFlags.ReferenceRenderModes / FixedMetalMatcaps are off).
+        for (const [key, look] of Object.entries(studio.LOOKS)) {
+            if (look.fixedReference) continue;
+            const button = document.createElement('button');
+            button.textContent = look.label;
+            button.className = key === currentLook ? 'active' : '';
+            button.addEventListener('click', () => applyLook(key));
+            host.appendChild(button);
         }
     }
 
@@ -313,7 +324,7 @@
         $('rough').value = appearance.roughness ?? 0.3;
         $('bands').value = appearance.toonBands ?? 4;
         $('bandsRow').style.display = appearance.shader === 'toon' ? '' : 'none';
-        $('pbrRow').style.display = appearance.shader === 'pbr' ? '' : 'none';
+        $('pbrRow').style.display = (appearance.shader === 'pbr' && advanced) ? '' : 'none';
         studio.setAppearance(appearance);
         renderLookButtons();
         syncLockButton();
@@ -362,7 +373,7 @@
         $('rough').value = a.roughness ?? 0.3;
         $('bands').value = a.toonBands ?? 4;
         $('bandsRow').style.display = a.shader === 'toon' ? '' : 'none';
-        $('pbrRow').style.display = a.shader === 'pbr' ? '' : 'none';
+        $('pbrRow').style.display = (a.shader === 'pbr' && advanced) ? '' : 'none';
         renderLookButtons();
         renderRenderModeButtons();
     }
@@ -375,7 +386,10 @@
         for (const light of list) {
             const card = document.createElement('div');
             card.className = light.selected ? 'card selected' : 'card';
-            const gradient = light.type === 'point' ? `
+            // Falloff / far-tint gradient, source size and floor-bounce are the per-light ADVANCED
+            // controls (parity with the app's ⚙ toggle): in simple mode a light shows just its colour,
+            // brightness and the on / clone / remove buttons.
+            const gradient = (advanced && light.type === 'point') ? `
                 <div class="row">
                     <label>Falloff <input type="range" data-id="${light.id}" data-k="decay" min="0.5" max="3" step="0.1" value="${light.decay}"
                         title="how fast it dims with distance — high for candles, low for lanterns"></label>
@@ -388,14 +402,14 @@
             const sizeControl = light.type === 'point' ? `
                     <label>Size <input type="range" data-id="${light.id}" data-k="size" min="0" max="24" step="1" value="${light.size}"
                         title="physical size of the source — bigger gives broader highlights and softer shadow edges"></label>` : '';
-            const bounceRow = `
+            const bounceRow = advanced ? `
                 <div class="row">
                     ${sizeControl}
                     <label><input type="checkbox" data-id="${light.id}" data-k="bounceOn" ${light.bounceStrength > 0 ? 'checked' : ''}> Bounce</label>
                     ${light.bounceStrength > 0 ? `
                         <input type="range" data-id="${light.id}" data-k="bounceStrength" min="0.05" max="1" step="0.05" value="${light.bounceStrength}"
                             title="how much bounces back up off the floor — the secondary NMM highlight (tinted by the Floor colour)">` : ''}
-                </div>`;
+                </div>` : '';
             card.innerHTML = `
                 <div class="row spread">
                     <span class="muted small" data-id="${light.id}" data-k="select" style="cursor:pointer"
@@ -724,7 +738,8 @@
     }
 
     function syncShadowRow() {
-        $('shadowTintRow').style.display = $('shadows').checked ? '' : 'none';
+        // Shadow colour / strength is an advanced tuning control (parity with the app).
+        $('shadowTintRow').style.display = ($('shadows').checked && advanced) ? '' : 'none';
     }
     const pushShadowTint = () => studio.setShadowTint({
         color: $('shadowTint').value, strength: parseFloat($('shadowStrength').value) });
@@ -805,6 +820,24 @@
     // Canvas-initiated changes (Delete key, Ctrl+Z undo) — resync every control that mirrors
     // engine state, same set as after loading a rig.
     studio.setChangeCallback(syncEngineControls);
+
+    // ⚙ Advanced controls — mirrors the app's toggle. Hidden entirely on the stable build (feature
+    // off → `advanced` is forced true so everything shows, unchanged). On early access the panel
+    // starts simple and re-renders the gated controls when toggled, remembering the choice per browser.
+    function applyAdvanced() {
+        $('pbrRow').style.display = (appearance.shader === 'pbr' && advanced) ? '' : 'none';
+        syncShadowRow();
+        refreshLights();
+    }
+    if (FEATURES.advancedControls) {
+        $('advancedRow').style.display = '';
+        $('advanced').checked = advanced;
+        $('advanced').addEventListener('change', () => {
+            advanced = $('advanced').checked;
+            try { localStorage.setItem('chromatory-studio-advanced', advanced ? '1' : '0'); } catch { /* private mode: preference just won't persist */ }
+            applyAdvanced();
+        });
+    }
 
     applyLook('silvernmm');
     if (FEATURES.renderModes) {
