@@ -3,8 +3,9 @@
 // the camera to that axis view around the current orbit target, keeping the distance.
 // Self-contained and reusable: hand it the renderer/camera/controls/canvas, call render()
 // after the main pass each frame, and give handlePointerDown() first refusal on clicks.
-// NOTE: the host must run with renderer.autoClear = false and clear explicitly — the cube pass
-// composites over the corner (clearDepth only), it must not blank it.
+// The cube pass manages clear state itself (autoClear saved/restored around a clearDepth-only
+// composite), so hosts keep their own clear semantics — capture paths that re-render the scene
+// stay cube-free automatically.
 import * as THREE from 'three';
 
 const SIZE = 92;    // css px
@@ -96,6 +97,8 @@ export function createViewCube(renderer, camera, controls, canvasEl) {
         scene.children.forEach(o => o.quaternion.copy(camera.quaternion).invert());
         const r = rect();
         const y = canvasEl.clientHeight - r.y - r.h; // three's viewport origin is bottom-left
+        const hostAutoClear = renderer.autoClear;
+        renderer.autoClear = false; // composite over the corner; never blank it
         renderer.clearDepth();
         renderer.setScissorTest(true);
         renderer.setViewport(r.x, y, r.w, r.h);
@@ -103,6 +106,7 @@ export function createViewCube(renderer, camera, controls, canvasEl) {
         renderer.render(scene, cubeCamera);
         renderer.setScissorTest(false);
         renderer.setViewport(0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
+        renderer.autoClear = hostAutoClear;
     }
 
     function snapTo(dir) {
@@ -151,7 +155,7 @@ export function createViewCube(renderer, camera, controls, canvasEl) {
         drag = null;
         controls.enabled = true;
         if (wasClick) {
-            const at = inRect(event);
+            const at = event ? inRect(event) : null;
             if (at) {
                 raycaster.setFromCamera(new THREE.Vector2(
                     ((at.px - at.r.x) / at.r.w) * 2 - 1,

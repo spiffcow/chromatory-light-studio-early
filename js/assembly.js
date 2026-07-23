@@ -55,7 +55,34 @@ function captureUndo(tag, coalesce) {
         states.push({ id, matrix: entry.mesh.matrix.toArray(), visible: entry.mesh.visible, scale: entry.scale });
     }
     undoStack.push({ tag, time: now, states });
-    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    if (undoStack.length > UNDO_LIMIT) {
+        const dropped = undoStack.shift();
+        if (dropped?.scissorRestore) disposeScissorOverlay(dropped.scissorRestore);
+    }
+}
+
+// The scissor overlay (marker spheres + routed polylines) is a Group of throwaway meshes; free its
+// GPU buffers when a stashed scissor state is discarded without ever being restored.
+function disposeScissorOverlay(s) {
+    s?.overlay?.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+}
+
+// Undoing a scissor cut brings the original part back (above) — put the cut points back too: re-hang
+// the kept overlay on the restored part and re-enter scissor mode on the still-live session, so the
+// user can tweak and cut again instead of re-clicking every point.
+function restoreScissorSession(s) {
+    const entry = parts.get(s.partId);
+    if (!entry) { disposeScissorOverlay(s); return; } // the part didn't come back — nothing to hang on
+    if (scissors) exitScissors();
+    entry.mesh.add(s.overlay);
+    s.busy = false;
+    s.pendingNewChain = false;
+    scissors = s;
+    selectPart(s.partId);   // highlights the part — but also attaches the gizmos, which...
+    moveGizmo.detach();     // ...scissor mode hides, so detach AFTER selecting
+    rotateGizmo.detach();
+    status('scissors: cut undone — your points are back; adjust or ✄ Cut again');
+    notifyChanged();
 }
 
 export function undo() {
@@ -84,6 +111,7 @@ export function undo() {
         syncPivot();
     }
     finally { restoringUndo = false; }
+    if (top.scissorRestore) restoreScissorSession(top.scissorRestore);
     return true;
 }
 
@@ -807,20 +835,87 @@ export async function snapSelected(auto = false) {
 // stays on the service; the canvas only places anchors and draws polylines.
 // ---------------------------------------------------------------------------------------------
 
-let scissors = null; // { sessionId, urlBase, headerName, headerValue, partId, overlay, markers, busy }
+let scissors = null; // { sessionId, backend, partId, overlay, chains, pendingNewChain, busy }
 
-async function scissorPost(path, body) {
-    const response = await fetch(`${scissors.urlBase}/${path}`, {
-        method: 'POST',
-        headers: { [scissors.headerName]: scissors.headerValue, 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-    });
-    if (!response.ok) {
-        let reason = `${response.status}`;
-        try { reason = (await response.json()).detail ?? reason; } catch { }
-        throw new Error(reason);
-    }
-    return await response.json();
+// ---------------------------------------------------------------------------------------------
+// Cut backend — the ONE seam between the assembly-cut UI and where the geometry actually RUNS.
+// `serverCutBackend` POSTs to the local service: the always-available path today, and the
+// permanent FALLBACK. A future `wasmCutBackend` will run the SAME MeshScissor geometry in-tab via
+// Blazor WASM (for the static early-access studio, no server) behind this identical shape:
+//   begin(stlBytes) -> { sessionId, ... }   build the crease graph for a part
+//   post(op, body)  -> result               op: 'anchor' | 'close' | 'undo' | 'cut'
+//   del(sessionId)                          drop the session
+// A session carries the backend it was opened with, so the two never mix mid-cut.
+// ---------------------------------------------------------------------------------------------
+function serverCutBackend(urlBase, headerName, headerValue) {
+    const headers = extra => ({ [headerName]: headerValue, ...extra });
+    return {
+        kind: 'server',
+        async begin(stlBytes) {
+            const r = await fetch(`${urlBase}/begin`, {
+                method: 'POST', headers: headers({ 'Content-Type': 'application/octet-stream' }), body: stlBytes
+            });
+            if (!r.ok) throw new Error(`${r.status}`);
+            return await r.json();
+        },
+        async post(op, body) {
+            const r = await fetch(`${urlBase}/${op}`, {
+                method: 'POST', headers: headers({ 'Content-Type': 'application/json' }), body: JSON.stringify(body)
+            });
+            if (!r.ok) {
+                let reason = `${r.status}`;
+                try { reason = (await r.json()).detail ?? reason; } catch { }
+                throw new Error(reason);
+            }
+            return await r.json();
+        },
+        del(sessionId) {
+            return fetch(`${urlBase}/${sessionId}`, { method: 'DELETE', headers: headers() }).catch(() => { });
+        }
+    };
+}
+
+// CLIENT backend (no server): runs the SAME ScissorCutSession in-tab. TWO hosts, ONE shape —
+//  • the STANDALONE shell sets globalThis.__chromatoryCut to the plain-WASM bridge exports
+//    (Chromatory.Wasm / WasmCutBridge.Begin/Anchor/…), no Blazor;
+//  • the BLAZOR app reaches WasmCut via DotNet.invokeMethodAsync.
+// Same begin/post/del the session code expects, so nothing below cares which host is live.
+function wasmCutBackend() {
+    const bridge = globalThis.__chromatoryCut;
+    const NAME = { begin: 'Begin', anchor: 'Anchor', close: 'Close', undo: 'Undo', cut: 'Cut', del: 'Del' };
+    const call = bridge
+        ? (op, ...args) => Promise.resolve(bridge[NAME[op]](...args))
+        : (op, ...args) => DotNet.invokeMethodAsync('Chromatory.Web', 'WasmCut' + NAME[op], ...args);
+    return {
+        kind: bridge ? 'wasm-standalone' : 'wasm-blazor',
+        async begin(stlBytes) {
+            return JSON.parse(await call('begin', stlToBase64(stlBytes), false));
+        },
+        async post(op, body) {
+            let json;
+            if (op === 'anchor') json = await call('anchor', body.sessionId, body.x, body.y, body.z, !!body.newChain);
+            else if (op === 'close') json = await call('close', body.sessionId);
+            else if (op === 'undo') json = await call('undo', body.sessionId);
+            else if (op === 'cut') json = await call('cut', body.sessionId, !!body.cap, body.flatten ?? 0.9, body.smooth ?? 0.6);
+            else throw new Error('unknown cut op: ' + op);
+            const result = JSON.parse(json);
+            if (result.error) throw new Error(result.error);
+            return result;
+        },
+        del(sessionId) { return call('del', sessionId); }
+    };
+}
+
+// Binary STL → base64 for the interop boundary, chunked so a ~50 MB part won't blow the call stack.
+function stlToBase64(u8) {
+    let s = '';
+    for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    return btoa(s);
+}
+
+// Every anchor/close/undo/cut call routes through the active session's backend.
+async function scissorPost(op, body) {
+    return scissors.backend.post(op, body);
 }
 
 function scissorMarkerSize(entry) {
@@ -860,24 +955,23 @@ export function scissorNewLine() {
 
 /// Enters scissor mode on the SELECTED part: uploads its local-space STL once, then clicks
 /// place anchors instead of moving parts. Returns a JSON status for the shell.
-export async function enterScissors(urlBase, headerName, headerValue) {
+export async function enterScissors(urlBase, headerName, headerValue, useWasm) {
     const entry = selectedId !== null ? parts.get(selectedId) : null;
     if (!entry) return JSON.stringify({ ok: false, reason: 'select a part first' });
     if (scissors) exitScissors();
-    status('preparing scissors (uploading part + building the crease graph)…');
+    status(useWasm
+        ? 'preparing scissors (building the crease graph in your browser)…'
+        : 'preparing scissors (uploading part + building the crease graph)…');
     try {
-        const response = await fetch(`${urlBase}/begin`, {
-            method: 'POST',
-            headers: { [headerName]: headerValue, 'Content-Type': 'application/octet-stream' },
-            body: exportPartLocalStl(entry)
-        });
-        if (!response.ok) throw new Error(`${response.status}`);
-        const result = await response.json();
+        // FeatureCompute.AssemblyCut decides: in-tab WASM for the standalones, the service otherwise.
+        // Everything below is backend-agnostic; server is the permanent fallback.
+        const backend = useWasm ? wasmCutBackend() : serverCutBackend(urlBase, headerName, headerValue);
+        const result = await backend.begin(exportPartLocalStl(entry));
 
         const overlay = new THREE.Group();
         entry.mesh.add(overlay); // local coords ride the part's transform
         scissors = {
-            sessionId: result.sessionId, urlBase, headerName, headerValue,
+            sessionId: result.sessionId, backend,
             partId: entry.id, overlay, chains: [], pendingNewChain: false, busy: false
         };
         moveGizmo.detach();
@@ -896,9 +990,7 @@ export function exitScissors() {
     const entry = parts.get(scissors.partId);
     entry?.mesh.remove(scissors.overlay);
     scissors.overlay.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
-    fetch(`${scissors.urlBase}/${scissors.sessionId}`, {
-        method: 'DELETE', headers: { [scissors.headerName]: scissors.headerValue }
-    }).catch(() => { });
+    scissors.backend.del(scissors.sessionId);
     scissors = null;
     status('');
 }
@@ -993,24 +1085,29 @@ export function scissorState() {
 }
 
 /// Executes the cut: the part is replaced by the separated pieces at the same transform.
-export async function scissorCut(cap) {
+export async function scissorCut(cap, flatten, smooth) {
     if (!scissors || scissors.busy) return JSON.stringify({ ok: false, reason: 'not in scissor mode' });
     scissors.busy = true;
     status('cutting…');
     try {
-        const result = await scissorPost('cut', { sessionId: scissors.sessionId, cap: !!cap });
+        const result = await scissorPost('cut', { sessionId: scissors.sessionId, cap: !!cap, flatten, smooth });
         const entry = parts.get(scissors.partId);
         if (!entry) throw new Error('the part disappeared mid-cut');
         entry.mesh.updateMatrix();
         const matrix = [...entry.mesh.matrix.toArray()];
         const baseName = entry.name;
 
-        // The session is consumed server-side; tear down the overlay without the DELETE call.
+        // KEEP the overlay + the (still-live) server session so Ctrl+Z can restore the cut points
+        // and re-cut. Detach the overlay from the part and stash the whole scissor state on the undo
+        // entry; it's re-attached on undo, or disposed if that entry is later evicted unused.
         entry.mesh.remove(scissors.overlay);
-        scissors.overlay.traverse(o => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+        const restorable = scissors;
         scissors = null;
 
         captureUndo('scissor-cut', false);
+        const undoTop = undoStack[undoStack.length - 1];
+        if (undoTop && undoTop.tag === 'scissor-cut') undoTop.scissorRestore = restorable;
+        else disposeScissorOverlay(restorable);
         undoSuppressDepth++;
         const added = [];
         try {

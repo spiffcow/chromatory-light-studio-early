@@ -6,6 +6,29 @@
     --accent-soft: rgba(230, 49, 127, 0.14);
     --accent-2: #35c4b5;        /* teal — secondary accents, focus, "thinking" */
     --accent-grad: linear-gradient(100deg, #ef2579, #35c4b5);
+
+    /* Surface + line tokens — every border and panel drinks from here. */
+    --bg: #131619;
+    --studio-bg: #101315;       /* 3D canvas letterbox — a touch darker than the page */
+    --panel: #1b2127;           /* cards, topbar */
+    --panel-2: #212830;         /* raised-on-a-card surfaces */
+    --line: #2b333b;            /* default hairline */
+    --line-strong: #3c4650;     /* hover / focus hairline */
+    --ink: #e9edf1;             /* primary text */
+    --muted: #8f9aa5;           /* secondary text */
+    --radius: 10px;
+    --radius-lg: 12px;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, .3);
+    --shadow-2: 0 4px 14px rgba(0, 0, 0, .35);
+
+    /* Status / semantic colours — ONE source for every success/warn/danger/info surface, so pages
+       stop hand-rolling near-miss greens and reds. Each has a solid (filled buttons), a soft (badge /
+       tinted background), and an ink (text/border on a soft or dark surface). */
+    --success: #24704b;  --success-soft: #1e3a2a;  --success-ink: #7fd39a;
+    --warning: #8a6d1f;  --warning-soft: #3a331e;  --warning-ink: #d3bd7f;
+    --danger:  #7a2c2c;  --danger-soft:  #3a1e1e;  --danger-ink:  #d37f7f;
+    --info:    #2d6cdf;  --info-soft:    #1e2a3a;  --info-ink:    #8fb4e8;
+    --gold: #d3bd7f;                 /* the "now / active" warm marker (active step, in-progress) */
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
@@ -13,18 +36,31 @@ html, body { margin: 0; padding: 0; }
    overflow that 100vw introduces (clip, not hidden, so sticky still works). */
 html { overflow-x: clip; }
 body {
-    background: #14171a;
-    color: #e8e8e8;
+    /* A whisper of brand light at the top of the page — depth without noise. */
+    background:
+        radial-gradient(1100px 420px at 78% -12%, rgba(230, 49, 127, 0.055), transparent 62%),
+        radial-gradient(900px 380px at 12% -14%, rgba(53, 196, 181, 0.045), transparent 60%),
+        var(--bg);
+    background-attachment: fixed;
+    color: var(--ink);
     font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
     font-size: 16px;
 }
 .boot { padding: 40px; color: #888; text-align: center; }
 
+/* Slim dark scrollbars so the panels feel native to the theme. */
+* { scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: var(--line); border-radius: 6px; border: 2px solid var(--bg); }
+*::-webkit-scrollbar-thumb:hover { background: var(--line-strong); }
+
 .shell { min-height: 100vh; display: flex; flex-direction: column; }
 .topbar {
     display: flex; align-items: center; gap: 16px;
     padding: 10px 16px;
-    background: #1c2126; border-bottom: 1px solid #222a30;
+    background: color-mix(in srgb, var(--panel) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
     position: sticky; top: 0; z-index: 10;
 }
 .brand {
@@ -36,84 +72,180 @@ body {
     color: #9db4c8; text-decoration: none; font-size: 15px; transition: color .15s, background .15s;
     padding: 6px 10px; border-radius: 7px; position: relative; white-space: nowrap;
 }
-.topbar nav a:hover { color: #e8e8e8; background: rgba(255, 255, 255, .04); }
+.topbar nav a:hover { color: var(--ink); background: rgba(255, 255, 255, .04); }
 .topbar nav a.active { color: #fff; background: var(--accent-soft); }
+
+/* Grouped nav dropdowns: Tools / Settings / About */
+.navmenu { position: relative; display: inline-flex; }
+.topbar nav button.navtrigger {
+    font: inherit; font-size: 15px; color: #9db4c8; background: none; border: 0; cursor: pointer;
+    padding: 6px 10px; border-radius: 7px; white-space: nowrap; transition: color .15s, background .15s;
+}
+.topbar nav button.navtrigger:hover { color: var(--ink); background: rgba(255, 255, 255, .04); }
+.topbar nav button.navtrigger.active { color: #fff; background: var(--accent-soft); }
+.navmenu-panel {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+    display: flex; flex-direction: column; gap: 2px; min-width: 190px; padding: 6px;
+    border-radius: 10px; background: var(--panel-2);
+    border: 1px solid var(--line-strong); box-shadow: var(--shadow-2);
+}
+.navmenu-panel a { display: block; }
+/* Transparent full-screen catcher so a click anywhere else closes an open menu. Sits below the
+   sticky topbar (z-10) so the triggers stay clickable, above page content. */
+.nav-backdrop { position: fixed; inset: 0; z-index: 9; }
+/* Per-tab icon + the sheet header are mobile affordances — hidden on the desktop text nav. */
+.topbar nav .ico, .navmenu-panel .sheet-title { display: none; }
 .content { padding: 18px 16px; max-width: 960px; width: 100%; margin: 0 auto; }
 
-/* On phones the 9-item nav wraps into an ugly stack; make it a clean one-line scroll strip. */
+/* ---- Mobile: a native-app bottom tab bar, with the group menus as bottom sheets. ------------- */
 @media (max-width: 680px) {
-    .topbar { gap: 10px; }
-    .topbar nav { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-    .topbar nav::-webkit-scrollbar { display: none; }
+    /* No backdrop-filter here: a filtered ancestor becomes the containing block for position:fixed,
+       which would pin the bottom bar to the top bar instead of the viewport. */
+    .topbar { gap: 10px; padding: 8px 14px; backdrop-filter: none; }
+
+    /* The nav pins to the bottom of the viewport as an app-style tab bar. Solid background rather
+       than backdrop-filter, so the fixed sheet panels inside it still reference the viewport. */
+    .topbar nav {
+        position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+        display: flex; flex-wrap: nowrap; gap: 0; align-items: stretch;
+        background: var(--panel);
+        border-top: 1px solid var(--line);
+        padding-bottom: env(safe-area-inset-bottom);
+    }
+    .topbar nav > a, .topbar nav > .navmenu { flex: 1 1 0; min-width: 0; display: flex; }
+    .topbar nav > a,
+    .topbar nav button.navtrigger {
+        flex: 1; flex-direction: column; align-items: center; justify-content: center;
+        gap: 3px; padding: 9px 2px; border-radius: 0; white-space: normal;
+    }
+    .topbar nav .ico { display: block; font-size: 20px; line-height: 1; }
+    .topbar nav .lbl { font-size: 10.5px; line-height: 1.1; }
+    .topbar nav .caret { display: none; }
+
+    /* Active tab: accent colour + a thin top marker, no filled pill. */
+    .topbar nav a.active,
+    .topbar nav button.navtrigger.active {
+        background: none; color: var(--accent);
+        box-shadow: inset 0 2px 0 0 var(--accent);
+    }
+
+    /* Group menus rise from the bottom as sheets, above the bar, over a dimmed backdrop. */
+    .navmenu-panel {
+        position: fixed; top: auto; left: 8px; right: 8px;
+        bottom: calc(60px + env(safe-area-inset-bottom)); z-index: 60;
+        min-width: 0; border-radius: 14px; padding: 8px;
+    }
+    .navmenu-panel .sheet-title {
+        display: block; font-size: 11.5px; color: var(--muted);
+        padding: 4px 10px 6px; text-transform: uppercase; letter-spacing: .05em;
+    }
+    .navmenu-panel a { padding: 13px 12px; font-size: 16px; border-radius: 9px; }
+    /* Keep the backdrop BELOW the topbar (z-10) so the bottom bar and its sheets — which live
+       inside the topbar's stacking context — stay above it and clickable. It still dims the page
+       content (which sits below it). Raising it here would swallow the sheet's own taps. */
+    .nav-backdrop { background: rgba(0, 0, 0, .45); }
+
+    /* Page content clears the fixed bottom bar. */
+    .content { padding-bottom: calc(74px + env(safe-area-inset-bottom)); }
 }
 
-h1 { font-size: 22px; margin: 6px 0 12px; }
-h2 { font-size: 17px; margin: 14px 0 8px; }
-.muted { color: #8a9099; }
+h1 { font-size: 23px; font-weight: 700; letter-spacing: -.01em; margin: 6px 0 12px; }
+h2 { font-size: 16.5px; font-weight: 650; color: #dbe3ea; margin: 14px 0 8px; }
+.muted { color: var(--muted); }
 .small { font-size: 13px; }
-.error { color: #e07777; }
+.error { color: var(--danger-ink); }
+kbd {
+    background: #242b32; border: 1px solid var(--line-strong); border-bottom-width: 2px;
+    border-radius: 5px; padding: 0 6px; font-size: 12px; font-family: Consolas, monospace;
+}
 
 .card {
-    background: #1c2126; border: 1px solid #2a3138; border-radius: 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg);
     padding: 12px 14px; margin-bottom: 10px;
     display: block; color: inherit; text-decoration: none;
+    box-shadow: var(--shadow-1);
 }
-.card { transition: border-color .15s, background .15s; }
-a.card:hover { border-color: #3b444d; background: #1f252b; }
-a.card:active { background: #232a31; }
+.card { transition: border-color .15s, background .15s, transform .12s, box-shadow .15s; }
+a.card:hover { border-color: var(--line-strong); background: #1f262d; transform: translateY(-1px); box-shadow: var(--shadow-2); }
+a.card:active { background: #232a31; transform: none; }
 .card .title { font-weight: 600; }
 /* The step you're actively painting: a warm left edge so "now" reads at a glance. */
-.card.active-step { border-left: 3px solid #d3bd7f; background: #211f16; }
+.card.active-step { border-left: 3px solid var(--gold); background: #211f16; }
 
 /* Project page tabs */
-.tabs { display: flex; gap: 4px; margin: 12px 0; border-bottom: 1px solid #2a3138; }
+.tabs { display: flex; gap: 4px; margin: 12px 0; border-bottom: 1px solid var(--line); }
 .tabs button {
     background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
     color: #9ab; padding: 8px 14px; font-size: 15px; cursor: pointer;
+    transition: color .15s, border-color .15s;
 }
+.tabs button:hover { color: #cdd6de; }
 .tabs button.active { color: #fff; border-bottom-color: var(--accent); }
 
 /* Photo gallery grid */
 .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin: 10px 0; }
 .gallery figure { margin: 0; }
-.gallery img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; }
+.gallery img {
+    width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px;
+    border: 1px solid var(--line); transition: border-color .15s, transform .12s;
+}
+.gallery img:hover { border-color: var(--line-strong); transform: scale(1.015); }
 .gallery figcaption { padding-top: 2px; }
 
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .spread { justify-content: space-between; }
 
 .badge {
-    font-size: 12px; padding: 2px 8px; border-radius: 10px;
+    font-size: 12px; padding: 2px 9px; border-radius: 999px;
     background: #2a3138; color: #9db4c8; white-space: nowrap;
+    border: 1px solid rgba(255, 255, 255, .05);
 }
-.badge.done { background: #1e3a2a; color: #7fd39a; }
-.badge.inprogress { background: #3a331e; color: #d3bd7f; }
-.badge.problem { background: #3a1e1e; color: #d37f7f; }
+.badge.done { background: var(--success-soft); color: var(--success-ink); }
+.badge.inprogress { background: var(--warning-soft); color: var(--warning-ink); }
+.badge.problem { background: var(--danger-soft); color: var(--danger-ink); }
+
+/* Empty states — ONE friendly, centred treatment for every "nothing here yet" list, so it reads as
+   guidance with a next step rather than a terse dead end. Pages distinguish a truly-empty list from
+   a search/filter that matched nothing. */
+.empty-state {
+    text-align: center; color: var(--muted);
+    padding: 44px 20px; display: flex; flex-direction: column; align-items: center; gap: 7px;
+}
+.empty-state .icon { font-size: 38px; line-height: 1; opacity: .85; }
+.empty-state .headline { color: var(--ink); font-weight: 600; font-size: 16px; }
+.empty-state .hint { font-size: 14px; max-width: 360px; line-height: 1.45; }
 
 input[type="text"], input[type="number"], textarea, select {
     width: 100%; padding: 10px 12px; margin: 4px 0;
-    background: #14171a; color: #e8e8e8;
-    border: 1px solid #2a3138; border-radius: 8px; font-size: 16px;
+    background: #14181c; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; font-size: 16px;
+    transition: border-color .15s, box-shadow .15s;
 }
-input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+input:focus, textarea:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
 input[type="range"] { accent-color: var(--accent); }
+input[type="checkbox"] { accent-color: var(--accent); }
 textarea { min-height: 70px; resize: vertical; }
-label { font-size: 13px; color: #8a9099; }
+label { font-size: 13px; color: var(--muted); }
 
 button, .btn {
-    padding: 10px 16px; margin: 4px 4px 4px 0;
-    background: #2a3138; color: #e8e8e8;
-    border: none; border-radius: 8px; font-size: 15px; cursor: pointer;
-    transition: background .15s, filter .15s, transform .05s;
+    padding: 9px 15px; margin: 4px 4px 4px 0;
+    background: var(--panel-2); color: var(--ink);
+    border: 1px solid transparent; border-radius: 9px; font-size: 15px; cursor: pointer;
+    transition: background .15s, filter .15s, transform .05s, border-color .15s, box-shadow .15s;
 }
 button:hover:not(:disabled), .btn:hover { filter: brightness(1.15); }
 button:active:not(:disabled) { transform: translateY(1px); }
-button.primary { background: var(--accent); color: #fff; }
+button:focus-visible, .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--accent-soft); }
+button.primary { background: var(--accent); color: #fff; box-shadow: 0 1px 6px rgba(230, 49, 127, .25); }
 button.primary:hover:not(:disabled) { background: var(--accent-press); filter: none; }
-button.success { background: #24704b; color: white; }
-button.warn { background: #8a6d1f; color: white; }
-button.danger { background: #7a2c2c; color: white; }
+button.success { background: var(--success); color: white; }
+button.warn { background: var(--warning); color: white; }
+button.danger { background: var(--danger); color: white; }
 button.ghost { background: transparent; color: #9db4c8; }
+button.ghost:hover:not(:disabled) { filter: none; background: rgba(255, 255, 255, .05); border-color: var(--line); color: var(--ink); }
 button:disabled { opacity: 0.5; cursor: default; }
 
 /* Inventory list */
@@ -121,7 +253,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .filters select { flex: 1; width: auto; }
 .filters button { flex: none; margin: 4px 0; }
 .swatch {
-    width: 20px; height: 20px; border-radius: 5px;
+    width: 20px; height: 20px; border-radius: 6px;
     border: 1px solid #3a424a; flex: none; display: inline-block;
 }
 .paint-card { cursor: pointer; }
@@ -130,7 +262,7 @@ button:disabled { opacity: 0.5; cursor: default; }
 .suggestions button { text-align: left; margin: 0; padding: 6px 10px; display: flex; gap: 8px; align-items: center; }
 .suggestions button:hover { background: #232a31; }
 .paint-meta { margin-top: 2px; }
-.paint-detail { margin-top: 8px; border-top: 1px solid #2a3138; padding-top: 8px; }
+.paint-detail { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
 .paint-notes { white-space: pre-wrap; margin-top: 4px; }
 
 .steps .card { margin-bottom: 8px; }
@@ -161,28 +293,45 @@ button:disabled { opacity: 0.5; cursor: default; }
 @keyframes pb-spin { to { transform: rotate(360deg); } }
 
 /* Collapsible panel sections (Light Studio et al): a card whose header toggles it. */
-details.section { padding: 10px 12px; margin: 10px 0; }
+details.section { padding: 11px 13px; margin: 10px 0; }
 details.section > summary {
     cursor: pointer; font-weight: 600; font-size: 1.02rem;
     list-style: none; user-select: none;
+    margin: -11px -13px; padding: 11px 13px;   /* the whole header row is the click target */
+    border-radius: var(--radius-lg);
+    transition: background .15s;
 }
+details.section > summary:hover { background: rgba(255, 255, 255, .03); }
 details.section > summary::-webkit-details-marker { display: none; }
-details.section > summary::before { content: "▸ "; color: #8a93a3; }
+details.section > summary::before { content: "▸ "; color: var(--accent-2); }
 details.section[open] > summary::before { content: "▾ "; }
-details.section[open] > summary { margin-bottom: 6px; }
+details.section[open] > summary {
+    margin-bottom: 8px;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    border-bottom: 1px solid var(--line);
+}
 
 /* A thumbs-down conversation card: dimmed with a red edge — it's excluded from what's sent to the AI. */
 .card.excluded {
     opacity: 0.6;
-    border-color: #d3574e;
+    border-color: var(--danger-ink);
     border-left-width: 3px;
-    background: rgba(211, 87, 78, 0.06);
+    background: color-mix(in srgb, var(--danger-ink) 7%, transparent);
 }
+
+/* Notice / callout cards: a coloured left accent + faint tint — ONE treatment across info/warn/danger,
+   matching the .card.active-step convention. Replaces scattered inline border-color on notice cards,
+   and reads at consistent weight across hues (a left bar doesn't need matching saturation per colour). */
+.card.info, .card.warn, .card.danger { border-left-width: 3px; }
+.card.info   { border-left-color: var(--info);        background: color-mix(in srgb, var(--info) 7%, var(--panel)); }
+.card.warn   { border-left-color: var(--warning-ink); background: color-mix(in srgb, var(--warning-ink) 8%, var(--panel)); }
+.card.danger { border-left-color: var(--danger-ink);  background: color-mix(in srgb, var(--danger-ink) 8%, var(--panel)); }
 
 /* Compact orientation cluster in the studio toolbar: reads as one control group, right-aligned. */
 .orient-group {
     display: inline-flex; align-items: center; gap: 3px; margin-left: auto;
     padding: 2px 4px 2px 8px; border-radius: 8px; background: rgba(255, 255, 255, .03);
+    border: 1px solid var(--line);
 }
 .orient-group button { margin: 0; padding: 5px 8px; min-width: 32px; }
 .orient-group .muted { margin-right: 2px; }
@@ -195,7 +344,21 @@ details.section[open] > summary { margin-bottom: 6px; }
    a panel BESIDE the render — mirroring the standalone studio — which needs
    more room than the 760px .content cap, so the layout breaks out to the full
    window width first. */
-.studio-canvas { display: block; }
+.studio-canvas { display: block; border: 1px solid var(--line); }
+
+/* Denser controls inside the studio panel: more tools per screen, calmer wall of buttons. */
+.studio-panel button { padding: 7px 12px; font-size: 14px; margin: 3px 3px 3px 0; }
+.studio-panel .card { padding: 10px 12px; box-shadow: none; }
+.studio-panel input[type="text"], .studio-panel input[type="number"], .studio-panel select {
+    padding: 7px 10px; font-size: 14px;
+}
+.studio-panel input[type="range"] { max-width: 140px; }
+
+/* Control utilities, consolidated off repeated inline styles: the narrow number inputs (17 of them)
+   and the tight 6px control rows. input.num ties input[type=number] on specificity and wins by source
+   order, overriding the default width:100%; .row.tight just tightens the shared .row gap. */
+input.num { width: 64px; }
+.row.tight { gap: 6px; }
 
 @media (min-width: 1200px) {
     /* Break out of the centered 760px .content column to use the whole window. */
@@ -221,7 +384,15 @@ details.section[open] > summary { margin-bottom: 6px; }
     .studio-panel > .section:first-of-type { margin-top: 0; }
 }
 
-/* Rendered markdown documents (the design vision card and friends) */
+/* Rendered markdown (the design vision card, and every AI chat message). Tight vertical rhythm so a
+   rendered bubble reads as compactly as the old raw text did — no giant default paragraph gaps. */
+.md-doc > :first-child { margin-top: 0; }
+.md-doc > :last-child { margin-bottom: 0; }
+.md-doc p { margin: 0 0 8px; }
+.md-doc ul, .md-doc ol { margin: 4px 0 8px; padding-left: 22px; }
+.md-doc li { margin: 2px 0; }
+.md-doc h3, .md-doc h4, .md-doc h5 { margin: 12px 0 5px; }
+.md-doc img { max-width: 100%; max-height: 420px; border-radius: 8px; display: block; margin: 6px 0; }
 .md-doc table { border-collapse: collapse; margin: 8px 0; }
 .md-doc th, .md-doc td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; }
 .md-doc th { background: rgba(255, 255, 255, 0.05); }
