@@ -114,8 +114,8 @@
     <div class="row" id="looks-live"></div>
     <div class="row">
         <label>Color <input type="color" id="color" value="#c8ccd2" /></label>
-        <label id="bandsRow" style="display:none">Bands <input type="range" id="bands" min="2" max="8" step="1" value="4" /></label>
     </div>
+    <div class="row" id="renderModeControls"></div>
     <div class="row" id="pbrRow">
         <label>Metal <input type="range" id="metal" min="0" max="1" step="0.05" value="1" /></label>
         <label>Rough <input type="range" id="rough" min="0.02" max="1" step="0.02" value="0.3" /></label>
@@ -322,8 +322,6 @@
         appearance.color = $('color').value;
         $('metal').value = appearance.metalness ?? 1;
         $('rough').value = appearance.roughness ?? 0.3;
-        $('bands').value = appearance.toonBands ?? 4;
-        $('bandsRow').style.display = appearance.shader === 'toon' ? '' : 'none';
         $('pbrRow').style.display = (appearance.shader === 'pbr' && advanced) ? '' : 'none';
         studio.setAppearance(appearance);
         renderLookButtons();
@@ -349,17 +347,49 @@
         appearance.renderMode = key;
         studio.setAppearance(appearance);
         renderRenderModeButtons();
+        renderRenderModeControls();
+    }
+
+    // Per-render-mode controls, generated from the SHARED schema (studio.RENDER_MODE_CONTROLS) so the
+    // standalone and the app expose the exact same set / ranges / defaults / labels. Each widget writes
+    // its appearance field and re-pushes; `when:'specLocked'` rows show only while highlights are frozen.
+    function renderRenderModeControls() {
+        const host = $('renderModeControls');
+        host.innerHTML = '';
+        if (!FEATURES.renderModes) return; // render modes are advance-only on the standalone for now
+        const controls = (studio.RENDER_MODE_CONTROLS || {})[currentRenderMode] || [];
+        const locked = studio.getSpecularLock();
+        for (const c of controls) {
+            if (c.when === 'specLocked' && !locked) continue;
+            const value = appearance[c.field] ?? c.default;
+            const label = document.createElement('label');
+            label.className = 'small';
+            if (c.title) label.title = c.title;
+            const input = document.createElement('input');
+            input.type = c.type;
+            if (c.type === 'range') { input.min = c.min; input.max = c.max; input.step = c.step; input.value = value; }
+            else if (c.type === 'checkbox') { input.checked = !!value; }
+            else if (c.type === 'color') { input.value = value; input.style.cssText = 'width:30px;height:26px;padding:0;border:none;background:none;cursor:pointer'; }
+            if (c.type === 'checkbox') label.append(input, ' ' + c.label);
+            else label.append(c.label + ' ', input);
+            input.addEventListener(c.type === 'range' ? 'input' : 'change', () => {
+                appearance[c.field] = c.type === 'checkbox' ? input.checked
+                    : c.type === 'color' ? input.value
+                    : (c.int ? parseInt(input.value, 10) : parseFloat(input.value));
+                studio.setAppearance(appearance);
+            });
+            host.appendChild(label);
+        }
     }
 
     function pushAppearance() {
         appearance.color = $('color').value;
         appearance.metalness = parseFloat($('metal').value);
         appearance.roughness = parseFloat($('rough').value);
-        appearance.toonBands = parseInt($('bands').value, 10);
         appearance.lookKey = currentLook; // rides into saved rigs so a load re-highlights the look
         studio.setAppearance(appearance);
     }
-    for (const id of ['color', 'metal', 'rough', 'bands']) $(id).addEventListener('input', pushAppearance);
+    for (const id of ['color', 'metal', 'rough']) $(id).addEventListener('input', pushAppearance);
 
     // After a rig load (or Ctrl+Z) the ENGINE holds the restored appearance — mirror it back into
     // the panel instead of letting stale inputs stomp it on the next touch.
@@ -371,11 +401,10 @@
         if (a.color) $('color').value = a.color;
         $('metal').value = a.metalness ?? 1;
         $('rough').value = a.roughness ?? 0.3;
-        $('bands').value = a.toonBands ?? 4;
-        $('bandsRow').style.display = a.shader === 'toon' ? '' : 'none';
         $('pbrRow').style.display = (a.shader === 'pbr' && advanced) ? '' : 'none';
         renderLookButtons();
         renderRenderModeButtons();
+        renderRenderModeControls();
     }
 
     // ---- Lights
@@ -753,6 +782,7 @@
         const locked = studio.getSpecularLock();
         $('lockSpec').textContent = locked ? '🔒 Highlights locked' : '🔒 Lock highlights';
         $('lockSpec').className = locked ? 'active' : 'ghost';
+        renderRenderModeControls(); // the "Mark line" rows apply only while highlights are frozen
     }
     $('lockSpec').addEventListener('click', () => {
         studio.setSpecularLock(!studio.getSpecularLock());
@@ -844,6 +874,7 @@
         $('render-modes').style.display = '';
         $('renderModeLabel').style.display = '';
         renderRenderModeButtons();
+        renderRenderModeControls();
     }
     refreshLights();
     refreshProps();

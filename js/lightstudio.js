@@ -327,6 +327,37 @@ export const RENDER_MODES = {
     contrast: { label: 'High contrast', fixedReference: true, matcap: 'highcontrast' }
 };
 
+// The extra tuning controls each render mode exposes — the SINGLE SOURCE OF TRUTH shared by both
+// shells (the app deserializes it via getRenderModeControlsJson, the standalone reads it directly),
+// so the two never drift. Each entry: the appearance `field` the engine reads (see the defaults and
+// clamps in DEFAULT_APPEARANCE / buildMaterial), the widget `type`, its range/step, `default`, and a
+// tooltip. `when: 'specLocked'` rows apply only while highlights are frozen; `int: true` marks a
+// whole-number range. Labels/tooltips are em-dash-free so they read cleanly in the public standalone.
+export const RENDER_MODE_CONTROLS = {
+    cel: [
+        { field: 'toonBands', label: 'Bands', type: 'range', min: 2, max: 8, step: 1, int: true, default: 4, title: 'How many flat lighting bands' },
+        { field: 'celOutline', label: 'Outline', type: 'range', min: 0, max: 3, step: 0.25, default: 1.0, title: 'Thickness of the inked outline (0 is none)' },
+        { field: 'celOutlineColor', label: 'Ink', type: 'color', default: '#0b0b0e', title: 'Outline ink colour' },
+        { field: 'celSoft', label: 'Soft', type: 'range', min: 0, max: 1, step: 0.05, default: 0.0, title: 'Feather the band edges: 0 is a hard cel, higher softens the transitions' },
+        { field: 'celReflectBands', label: 'Band reflections', type: 'checkbox', default: false, title: 'Also band the environment reflection: harder, flatter cel metals' },
+        { field: 'markWidth', label: 'Mark line', type: 'range', min: 0.5, max: 4, step: 0.5, default: 1.5, when: 'specLocked', title: "Thickness of the frozen 'where to mark' guide lines (only while highlights are locked)" },
+        { field: 'markAuto', label: 'Auto-contrast', type: 'checkbox', default: true, when: 'specLocked', title: 'Auto-pick a light or dark mark so it stays legible on any colour; off uses the ink colour' }
+    ],
+    value: [
+        { field: 'valueSteps', label: 'Steps', type: 'range', min: 2, max: 8, step: 1, int: true, default: 4, title: 'How many flat value steps to collapse the render into' },
+        { field: 'valueGray', label: 'Greyscale', type: 'checkbox', default: true, title: "Greyscale reads pure value; off keeps each area's hue at its stepped value" }
+    ],
+    vibrant: [
+        { field: 'vibrancePunch', label: 'Punch', type: 'range', min: 0, max: 1, step: 0.05, default: 1.0, title: 'Exaggerate the value range: deeper shadows, brighter highlights' },
+        { field: 'vibranceSat', label: 'Sat', type: 'range', min: 1, max: 2, step: 0.05, default: 1.35, title: 'Saturation boost (1 is neutral)' },
+        { field: 'vibranceTemp', label: 'Temp', type: 'range', min: 0, max: 1, step: 0.05, default: 0.3, title: "Warm highlights, cool shadows: the painter's temperature split" }
+    ],
+    cavity: [
+        { field: 'cavityStrength', label: 'Recess', type: 'range', min: 0, max: 2, step: 0.05, default: 1.0, title: 'How dark the recesses / creases go (where washes sit)' },
+        { field: 'cavityEdge', label: 'Edge', type: 'range', min: 0, max: 2, step: 0.05, default: 0.6, title: 'How bright the raised edges go (where edge-highlights sit)' }
+    ]
+};
+
 // Compatibility alias: the standalone shell's surface picker reads studio.LOOKS. Materials ARE that
 // surface; render modes are a separate axis exposed via getRenderModesJson and used only by the app
 // (so the still-experimental render modes stay out of the public standalone until they're released).
@@ -342,6 +373,9 @@ export function getMaterialsJson() {
 }
 export function getRenderModesJson() {
     return JSON.stringify(RENDER_MODES);
+}
+export function getRenderModeControlsJson() {
+    return JSON.stringify(RENDER_MODE_CONTROLS);
 }
 
 // The model's two materials are long-lived and SWAPPED, never rebuilt per paint-mode toggle:
