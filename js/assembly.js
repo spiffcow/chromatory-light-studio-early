@@ -218,6 +218,8 @@ export function dispose() {
     undoStack.length = 0;
     changeCallback = null;
     statusCallback = null;
+    workOverlay?.remove();
+    workOverlay = null;
 }
 
 function resize() {
@@ -239,8 +241,45 @@ function notifyChanged() {
     else changeCallback.invokeMethodAsync('OnAssemblyChangedFromCanvas');
 }
 
+// A "working" overlay pinned over the canvas. Long geometry ops (snap fit, merge/bake, cut, seam
+// detect/split) block the main thread, so the screen looked frozen. A CSS TRANSFORM spinner keeps
+// spinning on the COMPOSITOR thread even while JS is blocked — the one reliable "still working"
+// signal; the async ops (cut/detect/split fetches) leave the thread free so it animates outright.
+// Driven purely by status(): a trailing "…" means an op is in flight; anything else clears it. Lives
+// in assembly.js so both the app and the standalone shell get it for free.
+let workOverlay = null;
+function ensureWorkOverlay() {
+    if (workOverlay) return;
+    if (!document.getElementById('asm-work-style')) {
+        const s = document.createElement('style');
+        s.id = 'asm-work-style';
+        s.textContent = '@keyframes asm-spin{to{transform:rotate(360deg)}}';
+        document.head.appendChild(s);
+    }
+    workOverlay = document.createElement('div');
+    workOverlay.style.cssText =
+        'position:fixed;display:none;flex-direction:column;align-items:center;justify-content:center;' +
+        'gap:14px;z-index:2000;pointer-events:none;background:rgba(16,19,21,.5);color:#e9edf1;' +
+        'font:600 14px/1.35 system-ui,sans-serif;text-align:center;padding:12px;border-radius:10px';
+    workOverlay.innerHTML =
+        '<div style="width:40px;height:40px;border-radius:50%;border:3px solid rgba(255,255,255,.16);' +
+        'border-top-color:#35c4b5;animation:asm-spin .8s linear infinite;will-change:transform"></div>' +
+        '<div class="asm-work-label"></div>';
+    document.body.appendChild(workOverlay);
+}
+function showWork(text) {
+    ensureWorkOverlay();
+    if (!canvasEl) return;
+    const r = canvasEl.getBoundingClientRect();
+    Object.assign(workOverlay.style,
+        { left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px', display: 'flex' });
+    workOverlay.querySelector('.asm-work-label').textContent = text;
+}
+function hideWork() { if (workOverlay) workOverlay.style.display = 'none'; }
+
 function status(text) {
     if (text) devlog('status', { text }); // the narration IS a good trace
+    if (text && text.endsWith('…')) showWork(text); else hideWork(); // spinner while an op is in flight
     if (!statusCallback) return;
     if (typeof statusCallback === 'function') statusCallback(text);
     else statusCallback.invokeMethodAsync('OnAssemblyStatus', text);

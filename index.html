@@ -106,6 +106,8 @@
     <div class="row" id="looks-live"></div>
     <div class="muted small">Fixed idealized reference (ignores lights — the shapes to copy):</div>
     <div class="row" id="looks-fixed"></div>
+    <div class="muted small" id="renderModeLabel" style="display:none">Render style (composes with the material above):</div>
+    <div class="row" id="render-modes" style="display:none"></div>
     <div class="row">
         <label>Color <input type="color" id="color" value="#c8ccd2" /></label>
         <label id="bandsRow" style="display:none">Bands <input type="range" id="bands" min="2" max="8" step="1" value="4" /></label>
@@ -244,7 +246,7 @@
     // multiStl: the Scene section — add extra STLs as movable props to light a composed scene.
     // gemFinish: the Gem region material (inverted transmission look) — early-access first.
     // glowRegion: a painted area becomes a light source (lava, runes) — early-access first.
-    const FEATURES = { regions: true, assembly: true, multiStl: true, gemFinish: true, glowRegion: true };
+    const FEATURES = { regions: true, assembly: true, multiStl: true, gemFinish: true, glowRegion: true, renderModes: true };
 
     const $ = id => document.getElementById(id);
     const status = $('loadstatus');
@@ -282,9 +284,10 @@
         loadFile(event.dataTransfer.files[0]);
     });
 
-    // ---- Looks (single source: studio.LOOKS)
+    // ---- Looks: material (studio.LOOKS) x render mode (studio.RENDER_MODES), two independent axes.
     let currentLook = 'silvernmm';
-    const appearance = { shader: 'pbr', matcap: 'chrome', toonBands: 4, color: '#c8ccd2',
+    let currentRenderMode = 'realistic';
+    const appearance = { shader: 'pbr', renderMode: 'realistic', matcap: 'chrome', toonBands: 4, color: '#c8ccd2',
         metalness: 1.0, roughness: 0.3, clearcoat: 0, envIntensity: 0.75 };
 
     function renderLookButtons() {
@@ -316,6 +319,27 @@
         syncLockButton();
     }
 
+    // Render mode is the second Look axis — it composes WITH the chosen material (a cel-shaded gloss
+    // differs from cel-shaded matte). Only the lit modes; the fixed reference matcaps stay app-only.
+    function renderRenderModeButtons() {
+        const host = $('render-modes');
+        host.innerHTML = '';
+        for (const [key, mode] of Object.entries(studio.RENDER_MODES)) {
+            if (mode.fixedReference) continue;
+            const button = document.createElement('button');
+            button.textContent = mode.label;
+            button.className = key === currentRenderMode ? 'active' : '';
+            button.addEventListener('click', () => applyRenderMode(key));
+            host.appendChild(button);
+        }
+    }
+    function applyRenderMode(key) {
+        currentRenderMode = key;
+        appearance.renderMode = key;
+        studio.setAppearance(appearance);
+        renderRenderModeButtons();
+    }
+
     function pushAppearance() {
         appearance.color = $('color').value;
         appearance.metalness = parseFloat($('metal').value);
@@ -332,6 +356,7 @@
         const a = JSON.parse(studio.getAppearanceJson());
         Object.assign(appearance, a);
         if (a.lookKey && studio.LOOKS[a.lookKey]) currentLook = a.lookKey;
+        if (a.renderMode) currentRenderMode = a.renderMode;
         if (a.color) $('color').value = a.color;
         $('metal').value = a.metalness ?? 1;
         $('rough').value = a.roughness ?? 0.3;
@@ -339,6 +364,7 @@
         $('bandsRow').style.display = a.shader === 'toon' ? '' : 'none';
         $('pbrRow').style.display = a.shader === 'pbr' ? '' : 'none';
         renderLookButtons();
+        renderRenderModeButtons();
     }
 
     // ---- Lights
@@ -541,7 +567,9 @@
 
             const name = document.createElement('input');
             name.type = 'text'; name.value = slot.name; name.style.maxWidth = '150px';
-            name.addEventListener('input', () => { palette[i].name = name.value; pushPalette(); });
+            // Commit on blur/Enter, NOT on every keystroke: pushPalette() rebuilds this list, which
+            // would replace the input mid-type and drop focus after each character.
+            name.addEventListener('change', () => { palette[i].name = name.value; pushPalette(); });
 
             const material = document.createElement('select');
             material.title = 'How this area reflects light — metal gleams, matte stays flat' +
@@ -779,6 +807,11 @@
     studio.setChangeCallback(syncEngineControls);
 
     applyLook('silvernmm');
+    if (FEATURES.renderModes) {
+        $('render-modes').style.display = '';
+        $('renderModeLabel').style.display = '';
+        renderRenderModeButtons();
+    }
     refreshLights();
     refreshProps();
     syncShadowRow();
